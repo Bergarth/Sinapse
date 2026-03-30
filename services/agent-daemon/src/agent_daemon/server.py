@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import queue
 import re
 import threading
-import time
 import uuid
 from concurrent import futures
 from dataclasses import dataclass
@@ -25,6 +25,7 @@ from agent_daemon.windows_operator_runtime import load_windows_operator_service_
 from agent_daemon.services.memory import (
     ApprovalRecord,
     AppSettingRecord,
+    ArtifactRecord,
     ConversationRecord,
     MemoryService,
     MessageRecord,
@@ -34,6 +35,7 @@ from agent_daemon.services.memory import (
     WorkspaceRootRecord,
 )
 from agent_daemon.services.model_router import ChatCompletion, ModelRouter
+from agent_daemon.services.secret_store import SecretStore
 from agent_daemon.services.frd_zma_parser import (
     ParsedTableSummary,
     parse_frd_file,
@@ -126,7 +128,14 @@ class CorrelationIdInterceptor(grpc.ServerInterceptor):
 class DaemonContractService(pb2_grpc.DaemonContractServicer):
     """Daemon contract service with SQLite-backed conversation/message persistence."""
 
-    def __init__(self, memory_service: MemoryService, windows_operator_service, browser_operator_service) -> None:
+    def __init__(
+        self,
+        memory_service: MemoryService,
+        windows_operator_service,
+        browser_operator_service,
+        artifacts_root: Path,
+        secret_store: SecretStore,
+    ) -> None:
         self._memory = memory_service
         self._windows_operator = windows_operator_service
         self._browser_operator = browser_operator_service
@@ -140,8 +149,24 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         self._pending_approvals_lock = threading.Lock()
         self._logger = logging.getLogger("agent_daemon")
         self._speech_runtime = LocalSpeechRuntime()
+        self._artifacts_root = artifacts_root
+        self._artifacts_root.mkdir(parents=True, exist_ok=True)
+        self._secret_store = secret_store
+        self._restore_pending_approvals()
 
     _APP_SETTINGS_KEY = "model_provider_settings_v1"
+
+    def _restore_pending_approvals(self) -> None:
+        pending_approvals = self._memory.list_pending_approvals()
+        with self._pending_approvals_lock:
+            for approval in pending_approvals:
+                self._pending_approvals[approval.step_id] = PendingApproval(
+                    approval_id=approval.approval_id,
+                    task_id=approval.task_id,
+                    step_id=approval.step_id,
+                    requested_at=approval.requested_at,
+                    decision_event=threading.Event(),
+                )
 
     @staticmethod
     def _default_settings_payload(observed_at: str) -> dict:
@@ -628,7 +653,7 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             entry_id = entry.entry_id.strip().lower()
             provider_id = entry.provider_id.strip().lower()
             display_name = entry.display_name.strip()
-            placeholder_ref = entry.placeholder_ref.strip()
+            secret_input = entry.placeholder_ref.strip()
             created_at = entry.created_at.strip() or self._now()
 
             if not entry_id:
@@ -642,11 +667,33 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 )
             if not display_name:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Each API key entry needs a label.")
-            if not placeholder_ref.startswith("placeholder://"):
+            if not secret_input:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Each API key entry needs a secret value or secret:// ref.")
+
+            if secret_input.startswith("placeholder://"):
                 context.abort(
                     grpc.StatusCode.INVALID_ARGUMENT,
-                    "API key entries are placeholder refs only (must start with placeholder://).",
+                    "placeholder:// refs are no longer supported. Enter the key value so it can be stored securely.",
                 )
+
+            if secret_input.startswith("secret://local/"):
+                normalized_key = secret_input.removeprefix("secret://local/")
+                if not self._secret_store.has_secret(normalized_key):
+                    context.abort(
+                        grpc.StatusCode.INVALID_ARGUMENT,
+                        f"Secret reference '{secret_input}' was not found in local secure storage.",
+                    )
+                secret_ref = secret_input
+            else:
+                try:
+                    stored = self._secret_store.put_secret(
+                        key=f"{provider_id}:{entry_id}",
+                        secret_value=secret_input,
+                        created_at=created_at,
+                    )
+                except ValueError as ex:
+                    context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(ex))
+                secret_ref = stored.secret_ref
 
             seen_entry_ids.add(entry_id)
             entries.append(
@@ -654,7 +701,7 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                     "entry_id": entry_id,
                     "provider_id": provider_id,
                     "display_name": display_name,
-                    "placeholder_ref": placeholder_ref,
+                    "placeholder_ref": secret_ref,
                     "created_at": created_at,
                 }
             )
@@ -663,10 +710,10 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         search_provider_id = search_settings.provider_id.strip().lower() or "duckduckgo"
         search_endpoint = search_settings.endpoint.strip() or "https://api.duckduckgo.com/"
         search_api_key_placeholder_ref = search_settings.api_key_placeholder_ref.strip()
-        if search_api_key_placeholder_ref and not search_api_key_placeholder_ref.startswith("placeholder://"):
+        if search_api_key_placeholder_ref and not search_api_key_placeholder_ref.startswith("secret://local/"):
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                "Search API key placeholder must start with placeholder://.",
+                "Search API key reference must start with secret://local/.",
             )
 
         speech_settings = settings.speech_settings
@@ -1217,12 +1264,12 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             event_type=pb2.TASK_EVENT_TYPE_TASK_STARTED,
             task_status=task.task_status,
             title=task.title,
-            detail="Task started. Setting up first-time placeholder execution.",
+            detail="Task started. Preparing execution.",
         )
 
         executor = threading.Thread(
-            target=self._run_placeholder_task,
-            args=(task.task_id,),
+            target=self._run_task,
+            args=(task.task_id, True),
             daemon=True,
         )
         executor.start()
@@ -1233,9 +1280,11 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         now = request.approved_at.strip() or self._now()
         lowered_note = request.note.strip().lower()
         is_rejected = lowered_note.startswith(("deny", "reject", "cancel")) or lowered_note == "no"
+        had_live_waiter = False
         with self._pending_approvals_lock:
             pending = self._pending_approvals.get(request.step_id)
             if pending is not None:
+                had_live_waiter = True
                 pending.approved = not is_rejected
                 pending.note = request.note.strip()
                 pending.decided_by = request.approved_by.strip() or "desktop-shell"
@@ -1269,6 +1318,34 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                     else "User denied this step; task execution has been canceled."
                 ),
             )
+            approvals = self._memory.list_pending_approvals()
+            for approval in approvals:
+                if approval.task_id == request.task_id and approval.step_id == request.step_id:
+                    self._memory.upsert_approval(
+                        ApprovalRecord(
+                            approval_id=approval.approval_id,
+                            task_id=approval.task_id,
+                            step_id=approval.step_id,
+                            risk_class=approval.risk_class,
+                            action_title=approval.action_title,
+                            action_target=approval.action_target,
+                            reason=approval.reason,
+                            status="rejected" if is_rejected else "approved",
+                            requested_by=approval.requested_by,
+                            requested_at=approval.requested_at,
+                            decided_by=request.approved_by.strip() or "desktop-shell",
+                            note=request.note.strip(),
+                            decided_at=now,
+                        )
+                    )
+                    break
+
+            if not is_rejected and not had_live_waiter:
+                threading.Thread(
+                    target=self._run_task,
+                    args=(request.task_id, False),
+                    daemon=True,
+                ).start()
         return pb2.ApproveStepResponse(
             task_id=request.task_id,
             step_id=request.step_id,
@@ -1339,17 +1416,23 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
 
     def ListArtifacts(self, request, context):
         _ = context
+        if not request.task_id.strip():
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "task_id is required")
+
+        artifacts = self._memory.list_artifacts(request.task_id.strip())
         return pb2.ListArtifactsResponse(
             artifacts=[
                 pb2.ArtifactMetadata(
-                    artifact_id="artifact-placeholder",
-                    task_id=request.task_id,
-                    name="placeholder.txt",
-                    mime_type="text/plain",
-                    size_bytes=0,
-                    checksum_sha256="",
-                    created_at=self._now(),
+                    artifact_id=item.artifact_id,
+                    task_id=item.task_id,
+                    name=item.name,
+                    mime_type=item.mime_type,
+                    size_bytes=item.size_bytes,
+                    checksum_sha256=item.checksum_sha256,
+                    created_at=item.created_at,
+                    labels=item.labels,
                 )
+                for item in artifacts
             ]
         )
 
@@ -1412,7 +1495,37 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             with self._event_subscribers_lock:
                 self._event_subscribers = [item for item in self._event_subscribers if item is not event_queue]
 
-    def _run_placeholder_task(self, task_id: str) -> None:
+    def _persist_artifact(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        mime_type: str,
+        payload: bytes,
+        labels: dict[str, str] | None = None,
+    ) -> ArtifactRecord:
+        created_at = self._now()
+        artifact_id = f"artifact-{uuid.uuid4().hex[:10]}"
+        artifact_dir = self._artifacts_root / task_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / name
+        artifact_path.write_bytes(payload)
+        checksum = hashlib.sha256(payload).hexdigest()
+        return self._memory.upsert_artifact(
+            ArtifactRecord(
+                artifact_id=artifact_id,
+                task_id=task_id,
+                name=name,
+                mime_type=mime_type,
+                size_bytes=len(payload),
+                checksum_sha256=checksum,
+                storage_path=str(artifact_path),
+                labels=labels or {},
+                created_at=created_at,
+            )
+        )
+
+    def _run_task(self, task_id: str, require_approval: bool) -> None:
         task = self._memory.get_task(task_id)
         if task is None:
             return
@@ -1425,162 +1538,127 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             self._run_windows_enumeration_task(task)
             return
 
-        approval_step_id = f"{task_id}-approval-gate"
-        approved, approval_note = self._request_step_approval(
-            task=task,
-            step_id=approval_step_id,
-            step_title=task.title or "Planned action",
-            action_target="workspace / external destination inferred from task title",
-            requested_by="daemon-placeholder-flow",
-        )
-        if not approved:
-            canceled_at = self._now()
-            self._memory.upsert_task_step(
-                TaskStepRecord(
-                    step_id=approval_step_id,
-                    task_id=task_id,
-                    sequence_number=0,
-                    title="Approval gate",
-                    status="canceled",
-                    detail=approval_note,
-                    created_at=task.created_at,
-                    updated_at=canceled_at,
-                )
+        self._run_not_yet_supported_task(task, require_approval=require_approval)
+
+    def _run_not_yet_supported_task(self, task: TaskRecord, *, require_approval: bool) -> None:
+        task_id = task.task_id
+
+        if require_approval:
+            approval_step_id = f"{task_id}-approval-gate"
+            approved, approval_note = self._request_step_approval(
+                task=task,
+                step_id=approval_step_id,
+                step_title=task.title or "Planned action",
+                action_target="workspace / external destination inferred from task title",
+                requested_by="daemon",
             )
-            canceled_task = self._memory.upsert_task(
+            if not approved:
+                canceled_at = self._now()
+                self._memory.upsert_task_step(
+                    TaskStepRecord(
+                        step_id=approval_step_id,
+                        task_id=task_id,
+                        sequence_number=0,
+                        title="Approval gate",
+                        status="canceled",
+                        detail=approval_note,
+                        created_at=task.created_at,
+                        updated_at=canceled_at,
+                    )
+                )
+                canceled_task = self._memory.upsert_task(
+                    TaskRecord(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        task_status=pb2.TASK_STATUS_CANCELED,
+                        approval_status=pb2.APPROVAL_STATUS_REJECTED,
+                        title=task.title,
+                        created_at=task.created_at,
+                        updated_at=canceled_at,
+                    )
+                )
+                self._publish_task_event(
+                    task_id=task_id,
+                    step_id=approval_step_id,
+                    event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                    task_status=canceled_task.task_status,
+                    title="Task canceled after approval denial",
+                    detail=approval_note or "Denied by user before execution.",
+                )
+                return
+
+            resumed_task = self._memory.upsert_task(
                 TaskRecord(
                     task_id=task.task_id,
                     conversation_id=task.conversation_id,
-                    task_status=pb2.TASK_STATUS_CANCELED,
-                    approval_status=pb2.APPROVAL_STATUS_REJECTED,
+                    task_status=pb2.TASK_STATUS_RUNNING,
+                    approval_status=pb2.APPROVAL_STATUS_APPROVED,
                     title=task.title,
                     created_at=task.created_at,
-                    updated_at=canceled_at,
+                    updated_at=self._now(),
                 )
             )
             self._publish_task_event(
                 task_id=task_id,
                 step_id=approval_step_id,
-                event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
-                task_status=canceled_task.task_status,
-                title="Task canceled after approval denial",
-                detail=approval_note or "Denied by user before execution.",
+                event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
+                task_status=resumed_task.task_status,
+                title="Approval gate passed",
+                detail=approval_note,
             )
-            return
 
-        resumed_task = self._memory.upsert_task(
+        started_at = self._now()
+        step_id = f"{task_id}-step-not-supported"
+        detail = (
+            "NOT_YET_SUPPORTED: This task does not match an implemented handler yet. "
+            "Try a task that enumerates windows or opens a URL."
+        )
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=step_id,
+                task_id=task_id,
+                sequence_number=1,
+                title="Task handler selection",
+                status="not_supported",
+                detail=detail,
+                created_at=started_at,
+                updated_at=started_at,
+            )
+        )
+        self._persist_artifact(
+            task_id=task_id,
+            name="not-supported.json",
+            mime_type="application/json",
+            payload=json.dumps(
+                {
+                    "result": "not_supported",
+                    "task_id": task_id,
+                    "title": task.title,
+                    "detail": detail,
+                },
+                indent=2,
+            ).encode("utf-8"),
+            labels={"result": "not_supported"},
+        )
+        failed_task = self._memory.upsert_task(
             TaskRecord(
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
-                task_status=pb2.TASK_STATUS_RUNNING,
-                approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                task_status=pb2.TASK_STATUS_FAILED,
+                approval_status=pb2.APPROVAL_STATUS_PENDING,
                 title=task.title,
                 created_at=task.created_at,
-                updated_at=self._now(),
+                updated_at=started_at,
             )
         )
         self._publish_task_event(
             task_id=task_id,
-            step_id=approval_step_id,
-            event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
-            task_status=resumed_task.task_status,
-            title="Approval gate passed",
-            detail=approval_note,
+            step_id=step_id,
+            event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+            task_status=failed_task.task_status,
+            title=task.title,
+            detail=detail,
         )
-
-        fake_steps = [
-            "Understanding your request",
-            "Preparing a safe placeholder plan",
-            "Finalizing timeline output",
-        ]
-
-        try:
-            for index, step_title in enumerate(fake_steps, start=1):
-                started_at = self._now()
-                step_id = f"{task_id}-step-{index}"
-                self._memory.upsert_task_step(
-                    TaskStepRecord(
-                        step_id=step_id,
-                        task_id=task_id,
-                        sequence_number=index,
-                        title=step_title,
-                        status="running",
-                        detail="In progress",
-                        created_at=started_at,
-                        updated_at=started_at,
-                    )
-                )
-                self._publish_task_event(
-                    task_id=task_id,
-                    step_id=step_id,
-                    event_type=pb2.TASK_EVENT_TYPE_STEP_STARTED,
-                    task_status=pb2.TASK_STATUS_RUNNING,
-                    title=step_title,
-                    detail="Started",
-                )
-                time.sleep(0.6)
-
-                finished_at = self._now()
-                self._memory.upsert_task_step(
-                    TaskStepRecord(
-                        step_id=step_id,
-                        task_id=task_id,
-                        sequence_number=index,
-                        title=step_title,
-                        status="completed",
-                        detail="Done",
-                        created_at=started_at,
-                        updated_at=finished_at,
-                    )
-                )
-                self._publish_task_event(
-                    task_id=task_id,
-                    step_id=step_id,
-                    event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
-                    task_status=pb2.TASK_STATUS_RUNNING,
-                    title=step_title,
-                    detail="Completed successfully",
-                )
-
-            completed_at = self._now()
-            completed_task = self._memory.upsert_task(
-                TaskRecord(
-                    task_id=task.task_id,
-                    conversation_id=task.conversation_id,
-                    task_status=pb2.TASK_STATUS_COMPLETED,
-                    approval_status=pb2.APPROVAL_STATUS_APPROVED,
-                    title=task.title,
-                    created_at=task.created_at,
-                    updated_at=completed_at,
-                )
-            )
-            self._publish_task_event(
-                task_id=task_id,
-                event_type=pb2.TASK_EVENT_TYPE_TASK_FINISHED,
-                task_status=completed_task.task_status,
-                title=completed_task.title,
-                detail="Task finished. Placeholder flow complete.",
-            )
-        except Exception as exc:  # noqa: BLE001
-            failed_at = self._now()
-            self._memory.upsert_task(
-                TaskRecord(
-                    task_id=task.task_id,
-                    conversation_id=task.conversation_id,
-                    task_status=pb2.TASK_STATUS_FAILED,
-                    approval_status=pb2.APPROVAL_STATUS_PENDING,
-                    title=task.title,
-                    created_at=task.created_at,
-                    updated_at=failed_at,
-                )
-            )
-            self._publish_task_event(
-                task_id=task_id,
-                event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
-                task_status=pb2.TASK_STATUS_FAILED,
-                title=task.title,
-                detail=f"Task failed: {exc}",
-            )
 
     @staticmethod
     def _should_run_browser_open_task(task_title: str) -> bool:
@@ -1698,6 +1776,13 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                     created_at=started_at,
                     updated_at=finished_at,
                 )
+            )
+            self._persist_artifact(
+                task_id=task_id,
+                name="windows-enumeration.txt",
+                mime_type="text/plain",
+                payload=detail.encode("utf-8"),
+                labels={"handler": "windows_enumeration"},
             )
             self._publish_task_event(
                 task_id=task_id,
@@ -1864,6 +1949,13 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 f"Page title: {result.snapshot.title}\n"
                 f"Summary: {result.snapshot.summary}"
             )
+            self._persist_artifact(
+                task_id=task_id,
+                name="browser-open-url.txt",
+                mime_type="text/plain",
+                payload=detail.encode("utf-8"),
+                labels={"handler": "browser_open_url", "url": result.snapshot.url},
+            )
             self._memory.upsert_task_step(
                 TaskStepRecord(
                     step_id=step_id,
@@ -1943,14 +2035,24 @@ def create_server() -> grpc.Server:
         "AGENT_MEMORY_DB_PATH",
         str(repo_root / ".sinapse" / "memory.db"),
     )
+    runtime_root = Path(database_path).resolve().parent
+    artifacts_root = Path(os.environ.get("AGENT_ARTIFACTS_DIR", str(runtime_root / "artifacts"))).resolve()
+    secret_store_path = Path(os.environ.get("AGENT_SECRET_STORE_PATH", str(runtime_root / "secrets.json"))).resolve()
     memory_service = MemoryService(database_path=database_path, migrations_path=migrations_path)
+    secret_store = SecretStore(secret_store_path)
     windows_operator_service_class = load_windows_operator_service_class()
     windows_operator_service = windows_operator_service_class()
     browser_operator_service_class = load_browser_operator_service_class()
     browser_operator_service = browser_operator_service_class()
 
     pb2_grpc.add_DaemonContractServicer_to_server(
-        DaemonContractService(memory_service, windows_operator_service, browser_operator_service),
+        DaemonContractService(
+            memory_service,
+            windows_operator_service,
+            browser_operator_service,
+            artifacts_root=artifacts_root,
+            secret_store=secret_store,
+        ),
         server,
     )
 

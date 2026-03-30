@@ -4,7 +4,7 @@ Python 3.13 gRPC daemon service with the first real API surface wired from share
 
 ## Implemented surface
 
-The service implements `sinapse.contracts.v1.DaemonContract` from `packages/contracts/src/sinapse/contracts/v1/contracts.proto` with placeholder responses for:
+The service implements `sinapse.contracts.v1.DaemonContract` from `packages/contracts/src/sinapse/contracts/v1/contracts.proto` with production-backed persistence and first real task handlers for:
 
 - `StartConversation`
 - `SendUserMessage`
@@ -12,7 +12,7 @@ The service implements `sinapse.contracts.v1.DaemonContract` from `packages/cont
 - `ApproveStep`
 - `CancelTask`
 - `ResumeTask`
-- `ListArtifacts`
+- `ListArtifacts` (backed by persisted artifact records)
 - `ObserveSystemState` (server stream)
 
 Also included:
@@ -45,4 +45,4 @@ AGENT_DAEMON_HOST=127.0.0.1 AGENT_DAEMON_PORT=50055 agent-daemon
 ## Notes
 
 - Contract Python stubs are generated at runtime from the shared proto using `grpc_tools.protoc`, so `packages/contracts` remains the source of truth.
-- No planner/executor business logic is implemented yet; method bodies intentionally return placeholder data.
+- Generic/unmatched tasks now return explicit `NOT_YET_SUPPORTED` task results (with persisted artifacts) instead of fake placeholder progress.
