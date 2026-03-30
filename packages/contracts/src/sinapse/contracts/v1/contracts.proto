@@ -31,6 +31,12 @@ enum HealthStatus {
   HEALTH_STATUS_UNHEALTHY = 3;
 }
 
+enum MessageRole {
+  MESSAGE_ROLE_UNSPECIFIED = 0;
+  MESSAGE_ROLE_USER = 1;
+  MESSAGE_ROLE_ASSISTANT = 2;
+}
+
 message ArtifactMetadata {
   string artifact_id = 1;
   string task_id = 2;
@@ -74,6 +80,21 @@ message TaskSummaryDto {
   string updated_at = 7;
 }
 
+message ConversationDto {
+  string conversation_id = 1;
+  string title = 2;
+  string created_at = 3;
+  string updated_at = 4;
+}
+
+message ChatMessageDto {
+  string message_id = 1;
+  string conversation_id = 2;
+  MessageRole role = 3;
+  string content = 4;
+  string created_at = 5;
+}
+
 message HealthCheckRequest {
   string requester = 1;
 }
@@ -92,7 +113,7 @@ message StartConversationRequest {
 }
 
 message StartConversationResponse {
-  string conversation_id = 1;
+  ConversationDto conversation = 1;
   string started_at = 2;
 }
 
@@ -106,6 +127,9 @@ message SendUserMessageRequest {
 message SendUserMessageResponse {
   string daemon_message_id = 1;
   string accepted_at = 2;
+  ConversationDto conversation = 3;
+  ChatMessageDto user_message = 4;
+  ChatMessageDto assistant_message = 5;
 }
 
 message StartTaskRequest {

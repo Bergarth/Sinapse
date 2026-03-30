@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from concurrent import futures
 from datetime import UTC, datetime
 
@@ -77,8 +78,33 @@ class CorrelationIdInterceptor(grpc.ServerInterceptor):
 class DaemonContractService(pb2_grpc.DaemonContractServicer):
     """Placeholder implementations for the first daemon API surface."""
 
+    def __init__(self) -> None:
+        self._conversations: dict[str, pb2.ConversationDto] = {}
+
     def _now(self) -> str:
         return datetime.now(UTC).isoformat()
+
+    def _create_placeholder_assistant_reply(self, user_content: str) -> str:
+        prompt_summary = user_content.strip() or "your last message"
+        return (
+            "Thanks! I received your message and the daemon chat loop is working. "
+            f"(Echo summary: \"{prompt_summary[:120]}\")"
+        )
+
+    def _ensure_conversation(self, conversation_id: str, title: str = "Chat") -> pb2.ConversationDto:
+        if conversation_id and conversation_id in self._conversations:
+            return self._conversations[conversation_id]
+
+        now = self._now()
+        new_conversation_id = conversation_id or f"conv-{uuid.uuid4().hex[:8]}"
+        conversation = pb2.ConversationDto(
+            conversation_id=new_conversation_id,
+            title=title,
+            created_at=now,
+            updated_at=now,
+        )
+        self._conversations[new_conversation_id] = conversation
+        return conversation
 
     def HealthCheck(self, request, context):
         _ = (request, context)
@@ -106,17 +132,53 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         )
 
     def StartConversation(self, request, context):
-        _ = (request, context)
+        _ = context
+        conversation = self._ensure_conversation(
+            conversation_id="",
+            title=request.title or "New conversation",
+        )
         return pb2.StartConversationResponse(
-            conversation_id="conv-placeholder",
+            conversation=conversation,
             started_at=self._now(),
         )
 
     def SendUserMessage(self, request, context):
-        _ = (request, context)
+        _ = context
+        conversation = self._ensure_conversation(request.conversation_id)
+        accepted_at = self._now()
+
+        user_message_id = request.user_message_id or f"user-{uuid.uuid4().hex[:8]}"
+        assistant_message_id = f"assistant-{uuid.uuid4().hex[:8]}"
+
+        user_message = pb2.ChatMessageDto(
+            message_id=user_message_id,
+            conversation_id=conversation.conversation_id,
+            role=pb2.MESSAGE_ROLE_USER,
+            content=request.content,
+            created_at=request.sent_at or accepted_at,
+        )
+
+        assistant_message = pb2.ChatMessageDto(
+            message_id=assistant_message_id,
+            conversation_id=conversation.conversation_id,
+            role=pb2.MESSAGE_ROLE_ASSISTANT,
+            content=self._create_placeholder_assistant_reply(request.content),
+            created_at=accepted_at,
+        )
+
+        self._conversations[conversation.conversation_id] = pb2.ConversationDto(
+            conversation_id=conversation.conversation_id,
+            title=conversation.title,
+            created_at=conversation.created_at,
+            updated_at=accepted_at,
+        )
+
         return pb2.SendUserMessageResponse(
-            daemon_message_id="msg-placeholder",
-            accepted_at=self._now(),
+            daemon_message_id=assistant_message_id,
+            accepted_at=accepted_at,
+            conversation=self._conversations[conversation.conversation_id],
+            user_message=user_message,
+            assistant_message=assistant_message,
         )
 
     def StartTask(self, request, context):
