@@ -20,4 +20,28 @@ public sealed partial class TaskTimelineView : UserControl
         _ = sender;
         await ViewModel.StartTaskAsync();
     }
+
+    private async void StartRiskyTask_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        await ViewModel.StartRiskyDemoTaskAsync();
+    }
+
+    private async void Approve_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        await ViewModel.ApprovePendingStepAsync();
+    }
+
+    private async void Deny_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        await ViewModel.DenyPendingStepAsync();
+    }
+
+    private async void CancelTask_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        await ViewModel.CancelPendingTaskAsync();
+    }
 }

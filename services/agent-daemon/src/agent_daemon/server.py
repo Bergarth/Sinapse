@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from concurrent import futures
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from agent_daemon.contracts_runtime import load_contract_modules
 from agent_daemon.logging_utils import set_correlation_id
 from agent_daemon.windows_operator_runtime import load_windows_operator_service_class
 from agent_daemon.services.memory import (
+    ApprovalRecord,
     AppSettingRecord,
     ConversationRecord,
     MemoryService,
@@ -35,6 +37,26 @@ from agent_daemon.services.model_router import ChatCompletion, ModelRouter
 from agent_daemon.services.search_adapter import SearchResult, create_search_adapter
 
 pb2, pb2_grpc = load_contract_modules()
+
+
+@dataclass(frozen=True)
+class ActionRisk:
+    risk_class: str
+    action_title: str
+    action_target: str
+    reason: str
+
+
+@dataclass
+class PendingApproval:
+    approval_id: str
+    task_id: str
+    step_id: str
+    requested_at: str
+    decision_event: threading.Event
+    approved: bool | None = None
+    note: str = ""
+    decided_by: str = ""
 
 
 class CorrelationIdInterceptor(grpc.ServerInterceptor):
@@ -108,6 +130,8 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         )
         self._event_subscribers: list[queue.Queue] = []
         self._event_subscribers_lock = threading.Lock()
+        self._pending_approvals: dict[str, PendingApproval] = {}
+        self._pending_approvals_lock = threading.Lock()
         self._logger = logging.getLogger("agent_daemon")
 
     _APP_SETTINGS_KEY = "model_provider_settings_v1"
@@ -307,6 +331,157 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
 
         for subscriber in subscribers:
             subscriber.put(event)
+
+    def _classify_action_risk(self, *, action_title: str, action_target: str) -> ActionRisk:
+        normalized = f"{action_title} {action_target}".lower()
+        if any(token in normalized for token in ("delete", "remove", "drop", "destroy", "format", "truncate")):
+            return ActionRisk(
+                risk_class="destructive",
+                action_title=action_title,
+                action_target=action_target,
+                reason="This action can permanently remove or alter data.",
+            )
+        if any(token in normalized for token in ("send", "publish", "submit", "email", "message", "post")):
+            return ActionRisk(
+                risk_class="send",
+                action_title=action_title,
+                action_target=action_target,
+                reason="This action can send data outside of your workspace.",
+            )
+        if any(token in normalized for token in ("write", "edit", "modify", "update", "create", "save")):
+            return ActionRisk(
+                risk_class="write",
+                action_title=action_title,
+                action_target=action_target,
+                reason="This action can change local files or app state.",
+            )
+        return ActionRisk(
+            risk_class="read",
+            action_title=action_title,
+            action_target=action_target,
+            reason="Read-only action. No changes are made.",
+        )
+
+    def _requires_approval(self, risk_class: str) -> bool:
+        return risk_class in {"write", "send", "destructive"}
+
+    @staticmethod
+    def _approval_event_detail(risk: ActionRisk) -> str:
+        return (
+            "APPROVAL_REQUIRED\n"
+            f"Action: {risk.action_title}\n"
+            f"Why: {risk.reason}\n"
+            f"Target: {risk.action_target}\n"
+            f"Risk class: {risk.risk_class}"
+        )
+
+    def _request_step_approval(
+        self,
+        *,
+        task: TaskRecord,
+        step_id: str,
+        step_title: str,
+        action_target: str,
+        requested_by: str = "daemon",
+    ) -> tuple[bool, str]:
+        risk = self._classify_action_risk(action_title=step_title, action_target=action_target)
+        if not self._requires_approval(risk.risk_class):
+            return True, "Auto-approved read-only action."
+
+        requested_at = self._now()
+        approval_id = f"approval-{uuid.uuid4().hex[:8]}"
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=step_id,
+                task_id=task.task_id,
+                sequence_number=0,
+                title=f"Approval gate for: {step_title}",
+                status="waiting_for_approval",
+                detail=self._approval_event_detail(risk),
+                created_at=requested_at,
+                updated_at=requested_at,
+            )
+        )
+        pending = PendingApproval(
+            approval_id=approval_id,
+            task_id=task.task_id,
+            step_id=step_id,
+            requested_at=requested_at,
+            decision_event=threading.Event(),
+        )
+        with self._pending_approvals_lock:
+            self._pending_approvals[step_id] = pending
+
+        self._memory.upsert_approval(
+            ApprovalRecord(
+                approval_id=approval_id,
+                task_id=task.task_id,
+                step_id=step_id,
+                risk_class=risk.risk_class,
+                action_title=risk.action_title,
+                action_target=risk.action_target,
+                reason=risk.reason,
+                status="pending",
+                requested_by=requested_by,
+                requested_at=requested_at,
+            )
+        )
+        waiting_task = self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                task_status=pb2.TASK_STATUS_WAITING_FOR_APPROVAL,
+                approval_status=pb2.APPROVAL_STATUS_REQUIRED,
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=requested_at,
+            )
+        )
+        self._publish_task_event(
+            task_id=task.task_id,
+            step_id=step_id,
+            event_type=pb2.TASK_EVENT_TYPE_STEP_STARTED,
+            task_status=waiting_task.task_status,
+            title=f"Approval required: {step_title}",
+            detail=self._approval_event_detail(risk),
+        )
+
+        pending.decision_event.wait()
+        with self._pending_approvals_lock:
+            decision = self._pending_approvals.pop(step_id, None) or pending
+
+        approved = decision.approved is True
+        status = "approved" if approved else "rejected"
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=step_id,
+                task_id=task.task_id,
+                sequence_number=0,
+                title=f"Approval gate for: {step_title}",
+                status=status,
+                detail=decision.note or ("Approved by user." if approved else "Denied by user."),
+                created_at=decision.requested_at,
+                updated_at=self._now(),
+            )
+        )
+        self._memory.upsert_approval(
+            ApprovalRecord(
+                approval_id=decision.approval_id,
+                task_id=decision.task_id,
+                step_id=decision.step_id,
+                risk_class=risk.risk_class,
+                action_title=risk.action_title,
+                action_target=risk.action_target,
+                reason=risk.reason,
+                status=status,
+                requested_by=requested_by,
+                requested_at=decision.requested_at,
+                decided_by=decision.decided_by,
+                note=decision.note,
+                decided_at=self._now(),
+            )
+        )
+        return approved, decision.note or ("Approved by user." if approved else "Denied by user.")
 
     def _ensure_conversation(self, conversation_id: str, title: str = "Chat") -> ConversationRecord:
         if conversation_id:
@@ -886,39 +1061,112 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
 
     def ApproveStep(self, request, context):
         _ = context
+        now = request.approved_at.strip() or self._now()
+        lowered_note = request.note.strip().lower()
+        is_rejected = lowered_note.startswith(("deny", "reject", "cancel")) or lowered_note == "no"
+        with self._pending_approvals_lock:
+            pending = self._pending_approvals.get(request.step_id)
+            if pending is not None:
+                pending.approved = not is_rejected
+                pending.note = request.note.strip()
+                pending.decided_by = request.approved_by.strip() or "desktop-shell"
+                pending.decision_event.set()
+
+        task = self._memory.get_task(request.task_id)
+        if task is not None:
+            task_status = pb2.TASK_STATUS_RUNNING if not is_rejected else pb2.TASK_STATUS_CANCELED
+            approval_status = pb2.APPROVAL_STATUS_APPROVED if not is_rejected else pb2.APPROVAL_STATUS_REJECTED
+            self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=task_status,
+                    approval_status=approval_status,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=now,
+                )
+            )
+
+            self._publish_task_event(
+                task_id=task.task_id,
+                step_id=request.step_id,
+                event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
+                task_status=task_status,
+                title="Approval decision received",
+                detail=(
+                    "User approved this step; task execution is resuming."
+                    if not is_rejected
+                    else "User denied this step; task execution has been canceled."
+                ),
+            )
         return pb2.ApproveStepResponse(
             task_id=request.task_id,
             step_id=request.step_id,
-            approval_status=pb2.APPROVAL_STATUS_APPROVED,
+            approval_status=pb2.APPROVAL_STATUS_REJECTED if is_rejected else pb2.APPROVAL_STATUS_APPROVED,
         )
 
     def CancelTask(self, request, context):
         _ = context
-        return pb2.CancelTaskResponse(
-            task=pb2.TaskSummaryDto(
-                task_id=request.task_id,
-                conversation_id="conv-placeholder",
+        task = self._memory.get_task(request.task_id)
+        if task is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Task not found")
+
+        canceled_at = request.canceled_at.strip() or self._now()
+        canceled_task = self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
                 task_status=pb2.TASK_STATUS_CANCELED,
                 approval_status=pb2.APPROVAL_STATUS_REJECTED,
-                title="Canceled placeholder task",
-                created_at=self._now(),
-                updated_at=self._now(),
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=canceled_at,
             )
+        )
+        with self._pending_approvals_lock:
+            for pending in [item for item in self._pending_approvals.values() if item.task_id == request.task_id]:
+                pending.approved = False
+                pending.note = request.reason.strip() or "Task canceled by user."
+                pending.decided_by = request.canceled_by.strip() or "desktop-shell"
+                pending.decision_event.set()
+
+        self._publish_task_event(
+            task_id=request.task_id,
+            event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+            task_status=pb2.TASK_STATUS_CANCELED,
+            title="Task canceled",
+            detail=request.reason.strip() or "Canceled from shell.",
+        )
+        return pb2.CancelTaskResponse(
+            task=self._to_task_dto(canceled_task)
         )
 
     def ResumeTask(self, request, context):
         _ = context
-        return pb2.ResumeTaskResponse(
-            task=pb2.TaskSummaryDto(
-                task_id=request.task_id,
-                conversation_id="conv-placeholder",
+        task = self._memory.get_task(request.task_id)
+        if task is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Task not found")
+
+        resumed_task = self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
                 task_status=pb2.TASK_STATUS_RUNNING,
                 approval_status=pb2.APPROVAL_STATUS_PENDING,
-                title="Resumed placeholder task",
-                created_at=self._now(),
-                updated_at=self._now(),
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=request.resumed_at.strip() or self._now(),
             )
         )
+        self._publish_task_event(
+            task_id=task.task_id,
+            event_type=pb2.TASK_EVENT_TYPE_TASK_STARTED,
+            task_status=pb2.TASK_STATUS_RUNNING,
+            title="Task resumed",
+            detail="Task resumed from shell.",
+        )
+        return pb2.ResumeTaskResponse(task=self._to_task_dto(resumed_task))
 
     def ListArtifacts(self, request, context):
         _ = context
@@ -1007,6 +1255,69 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         if self._should_run_windows_enumeration_task(task.title):
             self._run_windows_enumeration_task(task)
             return
+
+        approval_step_id = f"{task_id}-approval-gate"
+        approved, approval_note = self._request_step_approval(
+            task=task,
+            step_id=approval_step_id,
+            step_title=task.title or "Planned action",
+            action_target="workspace / external destination inferred from task title",
+            requested_by="daemon-placeholder-flow",
+        )
+        if not approved:
+            canceled_at = self._now()
+            self._memory.upsert_task_step(
+                TaskStepRecord(
+                    step_id=approval_step_id,
+                    task_id=task_id,
+                    sequence_number=0,
+                    title="Approval gate",
+                    status="canceled",
+                    detail=approval_note,
+                    created_at=task.created_at,
+                    updated_at=canceled_at,
+                )
+            )
+            canceled_task = self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_CANCELED,
+                    approval_status=pb2.APPROVAL_STATUS_REJECTED,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=canceled_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                step_id=approval_step_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                task_status=canceled_task.task_status,
+                title="Task canceled after approval denial",
+                detail=approval_note or "Denied by user before execution.",
+            )
+            return
+
+        resumed_task = self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                task_status=pb2.TASK_STATUS_RUNNING,
+                approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=self._now(),
+            )
+        )
+        self._publish_task_event(
+            task_id=task_id,
+            step_id=approval_step_id,
+            event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
+            task_status=resumed_task.task_status,
+            title="Approval gate passed",
+            detail=approval_note,
+        )
 
         fake_steps = [
             "Understanding your request",
