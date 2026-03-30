@@ -1,5 +1,9 @@
 # Services
 
-Reserved for future UI-side services (such as dialog, navigation, or settings persistence adapters).
+UI-side service adapters used by the desktop shell.
 
-No external API clients or backend service logic should be added at this stage.
+Current service:
+
+- `DaemonConnectionService`: runs a gRPC health check to verify the shell can reach `agent-daemon` and returns a beginner-friendly connection status model.
+
+This is intentionally limited to connectivity and health probing only (no AI/task features yet).

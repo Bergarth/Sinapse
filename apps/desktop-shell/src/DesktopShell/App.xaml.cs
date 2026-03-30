@@ -1,3 +1,4 @@
+using DesktopShell.Services;
 using DesktopShell.ViewModels;
 using Microsoft.UI.Xaml;
 
@@ -10,10 +11,13 @@ public partial class App : Application
         InitializeComponent();
     }
 
-    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
-        var mainWindowViewModel = new MainWindowViewModel();
+        var daemonConnectionService = new DaemonConnectionService();
+        var mainWindowViewModel = new MainWindowViewModel(daemonConnectionService);
         var window = new MainWindow(mainWindowViewModel);
         window.Activate();
+
+        await mainWindowViewModel.RefreshConnectionStatusAsync();
     }
 }

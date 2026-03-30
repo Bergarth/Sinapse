@@ -12,4 +12,10 @@ public sealed partial class MainWindow : Window
         ViewModel = viewModel;
         InitializeComponent();
     }
+
+    private async void RetryConnectionCheck_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        await ViewModel.RefreshConnectionStatusAsync();
+    }
 }
