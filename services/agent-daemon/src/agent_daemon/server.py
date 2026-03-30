@@ -1,0 +1,230 @@
+"""gRPC server implementation for agent-daemon."""
+
+from __future__ import annotations
+
+import logging
+from concurrent import futures
+from datetime import UTC, datetime
+
+import grpc
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
+
+from agent_daemon.contracts_runtime import load_contract_modules
+from agent_daemon.logging_utils import set_correlation_id
+
+pb2, pb2_grpc = load_contract_modules()
+
+
+class CorrelationIdInterceptor(grpc.ServerInterceptor):
+    """Inject correlation IDs from metadata into request context."""
+
+    def intercept_service(self, continuation, handler_call_details):
+        handler = continuation(handler_call_details)
+        if handler is None:
+            return None
+
+        method = handler_call_details.method
+        metadata = dict(handler_call_details.invocation_metadata or ())
+
+        def wrap_unary_unary(behavior):
+            def inner(request, context):
+                correlation_id = set_correlation_id(metadata.get("x-correlation-id"))
+                logging.getLogger("agent_daemon").info(
+                    "request received",
+                    extra={
+                        "grpc_method": method,
+                        "peer": context.peer(),
+                    },
+                )
+                context.set_trailing_metadata(("x-correlation-id", correlation_id))
+                return behavior(request, context)
+
+            return inner
+
+        def wrap_unary_stream(behavior):
+            def inner(request, context):
+                correlation_id = set_correlation_id(metadata.get("x-correlation-id"))
+                logging.getLogger("agent_daemon").info(
+                    "stream request received",
+                    extra={
+                        "grpc_method": method,
+                        "peer": context.peer(),
+                    },
+                )
+                context.set_trailing_metadata(("x-correlation-id", correlation_id))
+                yield from behavior(request, context)
+
+            return inner
+
+        if handler.unary_unary:
+            return grpc.unary_unary_rpc_method_handler(
+                wrap_unary_unary(handler.unary_unary),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+
+        if handler.unary_stream:
+            return grpc.unary_stream_rpc_method_handler(
+                wrap_unary_stream(handler.unary_stream),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+
+        return handler
+
+
+class DaemonContractService(pb2_grpc.DaemonContractServicer):
+    """Placeholder implementations for the first daemon API surface."""
+
+    def _now(self) -> str:
+        return datetime.now(UTC).isoformat()
+
+    def HealthCheck(self, request, context):
+        _ = (request, context)
+        return pb2.HealthCheckResponse(
+            daemon=pb2.ServiceHealthDto(
+                service_name="agent-daemon",
+                status=pb2.HEALTH_STATUS_HEALTHY,
+                observed_at=self._now(),
+                detail="placeholder health check",
+            ),
+            shell=pb2.ServiceHealthDto(
+                service_name="agent-shell",
+                status=pb2.HEALTH_STATUS_DEGRADED,
+                observed_at=self._now(),
+                detail="shell dependency not wired yet",
+            ),
+        )
+
+    def StartConversation(self, request, context):
+        _ = (request, context)
+        return pb2.StartConversationResponse(
+            conversation_id="conv-placeholder",
+            started_at=self._now(),
+        )
+
+    def SendUserMessage(self, request, context):
+        _ = (request, context)
+        return pb2.SendUserMessageResponse(
+            daemon_message_id="msg-placeholder",
+            accepted_at=self._now(),
+        )
+
+    def StartTask(self, request, context):
+        _ = (request, context)
+        return pb2.StartTaskResponse(
+            task=pb2.TaskSummaryDto(
+                task_id="task-placeholder",
+                conversation_id=request.conversation_id,
+                task_status=pb2.TASK_STATUS_PENDING,
+                approval_status=pb2.APPROVAL_STATUS_REQUIRED,
+                title=request.title or "Placeholder task",
+                created_at=self._now(),
+                updated_at=self._now(),
+            )
+        )
+
+    def ApproveStep(self, request, context):
+        _ = context
+        return pb2.ApproveStepResponse(
+            task_id=request.task_id,
+            step_id=request.step_id,
+            approval_status=pb2.APPROVAL_STATUS_APPROVED,
+        )
+
+    def CancelTask(self, request, context):
+        _ = context
+        return pb2.CancelTaskResponse(
+            task=pb2.TaskSummaryDto(
+                task_id=request.task_id,
+                conversation_id="conv-placeholder",
+                task_status=pb2.TASK_STATUS_CANCELED,
+                approval_status=pb2.APPROVAL_STATUS_REJECTED,
+                title="Canceled placeholder task",
+                created_at=self._now(),
+                updated_at=self._now(),
+            )
+        )
+
+    def ResumeTask(self, request, context):
+        _ = context
+        return pb2.ResumeTaskResponse(
+            task=pb2.TaskSummaryDto(
+                task_id=request.task_id,
+                conversation_id="conv-placeholder",
+                task_status=pb2.TASK_STATUS_RUNNING,
+                approval_status=pb2.APPROVAL_STATUS_PENDING,
+                title="Resumed placeholder task",
+                created_at=self._now(),
+                updated_at=self._now(),
+            )
+        )
+
+    def ListArtifacts(self, request, context):
+        _ = context
+        return pb2.ListArtifactsResponse(
+            artifacts=[
+                pb2.ArtifactMetadata(
+                    artifact_id="artifact-placeholder",
+                    task_id=request.task_id,
+                    name="placeholder.txt",
+                    mime_type="text/plain",
+                    size_bytes=0,
+                    checksum_sha256="",
+                    created_at=self._now(),
+                )
+            ]
+        )
+
+    def ObserveSystemState(self, request, context):
+        _ = (request, context)
+        yield pb2.SystemStateEvent(
+            event_id="event-placeholder",
+            observed_at=self._now(),
+            workspace=pb2.WorkspaceDto(
+                workspace_id=request.workspace_id or "workspace-placeholder",
+                root_path="/workspace",
+                active_task_id="task-placeholder",
+                created_at=self._now(),
+                updated_at=self._now(),
+            ),
+            tasks=[
+                pb2.TaskSummaryDto(
+                    task_id="task-placeholder",
+                    conversation_id="conv-placeholder",
+                    task_status=pb2.TASK_STATUS_RUNNING,
+                    approval_status=pb2.APPROVAL_STATUS_PENDING,
+                    title="Placeholder observed task",
+                    created_at=self._now(),
+                    updated_at=self._now(),
+                )
+            ],
+            services=[
+                pb2.ServiceHealthDto(
+                    service_name="agent-daemon",
+                    status=pb2.HEALTH_STATUS_HEALTHY,
+                    observed_at=self._now(),
+                    detail="placeholder event snapshot",
+                )
+            ],
+        )
+
+
+def create_server() -> grpc.Server:
+    """Create and wire the daemon gRPC server."""
+
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        interceptors=[CorrelationIdInterceptor()],
+    )
+    pb2_grpc.add_DaemonContractServicer_to_server(DaemonContractService(), server)
+
+    health_servicer = health.HealthServicer()
+    health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    health_servicer.set(
+        "sinapse.contracts.v1.DaemonContract",
+        health_pb2.HealthCheckResponse.SERVING,
+    )
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+
+    return server
