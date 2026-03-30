@@ -39,6 +39,17 @@ public sealed class ChatMessageViewModel
     public bool IsAssistant { get; init; }
 
     public required string HandlerLabel { get; init; }
+
+    public ObservableCollection<SearchSourceViewModel> Sources { get; init; } = [];
+
+    public bool HasSources => Sources.Count > 0;
+}
+
+public sealed class SearchSourceViewModel
+{
+    public required string Title { get; init; }
+
+    public required string Url { get; init; }
 }
 
 public class ChatViewModel : INotifyPropertyChanged
@@ -144,7 +155,7 @@ public class ChatViewModel : INotifyPropertyChanged
         PendingMessageText = string.Empty;
 
         Messages.Add(MapMessage(result.UserMessage));
-        Messages.Add(MapMessage(result.AssistantMessage));
+        Messages.Add(MapMessage(result.AssistantMessage, result.SearchResult?.Sources));
 
         ConversationChanged?.Invoke(this, result.Conversation.ConversationId);
         await RefreshWorkspaceAsync(cancellationToken);
@@ -260,8 +271,20 @@ public class ChatViewModel : INotifyPropertyChanged
         };
     }
 
-    private static ChatMessageViewModel MapMessage(ChatMessageDto message)
+    private static ChatMessageViewModel MapMessage(
+        ChatMessageDto message,
+        IReadOnlyList<SearchSourceDto>? sources = null)
     {
+        var sourceViewModels = sources is null
+            ? []
+            : [.. sources
+                .Where(source => !string.IsNullOrWhiteSpace(source.Url))
+                .Select(source => new SearchSourceViewModel
+                {
+                    Title = string.IsNullOrWhiteSpace(source.Title) ? "Source" : source.Title,
+                    Url = source.Url,
+                })];
+
         return new ChatMessageViewModel
         {
             MessageId = message.MessageId,
@@ -270,6 +293,7 @@ public class ChatViewModel : INotifyPropertyChanged
             Timestamp = message.CreatedAt,
             IsAssistant = message.Role == MessageRole.Assistant,
             HandlerLabel = BuildHandlerLabel(message),
+            Sources = sourceViewModels,
         };
     }
 

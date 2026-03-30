@@ -142,6 +142,7 @@ public sealed class DaemonConnectionService
                 ConversationId: sendResponse.Conversation.ConversationId,
                 UserMessage: sendResponse.UserMessage,
                 AssistantMessage: sendResponse.AssistantMessage,
+                SearchResult: sendResponse.SearchResult,
                 Conversation: sendResponse.Conversation,
                 ErrorMessage: null);
         }
@@ -152,6 +153,7 @@ public sealed class DaemonConnectionService
                 ConversationId: conversationId,
                 UserMessage: null,
                 AssistantMessage: null,
+                SearchResult: null,
                 Conversation: null,
                 ErrorMessage: $"Daemon error: {ex.Status.Detail}");
         }
@@ -162,6 +164,7 @@ public sealed class DaemonConnectionService
                 ConversationId: conversationId,
                 UserMessage: null,
                 AssistantMessage: null,
+                SearchResult: null,
                 Conversation: null,
                 ErrorMessage: ex.Message);
         }
@@ -375,6 +378,7 @@ public sealed record SendMessageResult(
     string? ConversationId,
     ChatMessageDto? UserMessage,
     ChatMessageDto? AssistantMessage,
+    SearchResultDto? SearchResult,
     ConversationDto? Conversation,
     string? ErrorMessage);
 

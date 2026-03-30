@@ -134,6 +134,25 @@ message ChatMessageDto {
   string model_id = 7;
 }
 
+message SearchSourceDto {
+  string title = 1;
+  string url = 2;
+}
+
+message SearchResultDto {
+  string query = 1;
+  string answer = 2;
+  string provider_id = 3;
+  repeated SearchSourceDto sources = 4;
+}
+
+message SearchSettingsDto {
+  bool enabled = 1;
+  string provider_id = 2;
+  string endpoint = 3;
+  string api_key_placeholder_ref = 4;
+}
+
 message WorkspaceRootDto {
   string root_id = 1;
   string conversation_id = 2;
@@ -166,6 +185,7 @@ message AppSettingsDto {
   repeated ProviderConfigDto providers = 3;
   repeated ApiKeyEntryDto api_key_entries = 4;
   string updated_at = 5;
+  SearchSettingsDto search_settings = 6;
 }
 
 message CapabilityStatusDto {
@@ -210,6 +230,7 @@ message SendUserMessageResponse {
   ConversationDto conversation = 3;
   ChatMessageDto user_message = 4;
   ChatMessageDto assistant_message = 5;
+  SearchResultDto search_result = 6;
 }
 
 message AttachWorkspaceRootRequest {

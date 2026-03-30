@@ -30,7 +30,8 @@ from agent_daemon.services.memory import (
     WorkspaceFileRecord,
     WorkspaceRootRecord,
 )
-from agent_daemon.services.model_router import ModelRouter
+from agent_daemon.services.model_router import ChatCompletion, ModelRouter
+from agent_daemon.services.search_adapter import SearchResult, create_search_adapter
 
 pb2, pb2_grpc = load_contract_modules()
 
@@ -119,6 +120,12 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 {"provider_id": "placeholder", "display_name": "Built-in Placeholder"},
             ],
             "api_key_entries": [],
+            "search_settings": {
+                "enabled": False,
+                "provider_id": "duckduckgo",
+                "endpoint": "https://api.duckduckgo.com/",
+                "api_key_placeholder_ref": "",
+            },
             "updated_at": observed_at,
         }
 
@@ -140,6 +147,9 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
     def _to_app_settings_dto(self, payload: dict):
         providers = payload.get("providers", [])
         api_key_entries = payload.get("api_key_entries", [])
+        search_settings = payload.get("search_settings", {})
+        if not isinstance(search_settings, dict):
+            search_settings = {}
         return pb2.AppSettingsDto(
             model_mode=getattr(pb2, payload.get("model_mode", "MODEL_MODE_GUIDED"), pb2.MODEL_MODE_GUIDED),
             provider_preference=getattr(
@@ -167,6 +177,12 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 if isinstance(entry, dict)
             ],
             updated_at=str(payload.get("updated_at", self._now())),
+            search_settings=pb2.SearchSettingsDto(
+                enabled=bool(search_settings.get("enabled", False)),
+                provider_id=str(search_settings.get("provider_id", "duckduckgo")).strip(),
+                endpoint=str(search_settings.get("endpoint", "https://api.duckduckgo.com/")).strip(),
+                api_key_placeholder_ref=str(search_settings.get("api_key_placeholder_ref", "")).strip(),
+            ),
         )
 
     def _now(self) -> str:
@@ -318,6 +334,11 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 detail="Conversation loop with local model routing is available.",
             ),
             pb2.CapabilityStatusDto(
+                capability_name="web search",
+                is_available=True,
+                detail="Search-enabled chat requests are supported when search is enabled in settings.",
+            ),
+            pb2.CapabilityStatusDto(
                 capability_name="tasks",
                 is_available=True,
                 detail="Task timeline scaffold is available.",
@@ -431,6 +452,16 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 }
             )
 
+        search_settings = settings.search_settings
+        search_provider_id = search_settings.provider_id.strip().lower() or "duckduckgo"
+        search_endpoint = search_settings.endpoint.strip() or "https://api.duckduckgo.com/"
+        search_api_key_placeholder_ref = search_settings.api_key_placeholder_ref.strip()
+        if search_api_key_placeholder_ref and not search_api_key_placeholder_ref.startswith("placeholder://"):
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "Search API key placeholder must start with placeholder://.",
+            )
+
         updated_at = self._now()
         payload = {
             "model_mode": pb2.ModelMode.Name(settings.model_mode or pb2.MODEL_MODE_GUIDED),
@@ -439,6 +470,12 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             ),
             "providers": providers,
             "api_key_entries": entries,
+            "search_settings": {
+                "enabled": bool(search_settings.enabled),
+                "provider_id": search_provider_id,
+                "endpoint": search_endpoint,
+                "api_key_placeholder_ref": search_api_key_placeholder_ref,
+            },
             "updated_at": updated_at,
         }
 
@@ -480,7 +517,11 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         )
 
         settings_payload = self._load_app_settings_payload()
-        completion = self._model_router.complete(request.content, settings_payload)
+        search_result = self._try_run_search(request.content, settings_payload)
+        if search_result is None:
+            completion = self._model_router.complete(request.content, settings_payload)
+        else:
+            completion = self._build_search_completion(search_result)
         assistant_message = MessageRecord(
             message_id=assistant_message_id,
             conversation_id=conversation.conversation_id,
@@ -509,6 +550,98 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             conversation=self._to_conversation_dto(updated_conversation),
             user_message=self._to_message_dto(user_message),
             assistant_message=self._to_message_dto(assistant_message),
+            search_result=self._to_search_result_dto(search_result),
+        )
+
+    @staticmethod
+    def _build_search_completion(search_result: SearchResult):
+        source_lines = [f"- {source.title}: {source.url}" for source in search_result.sources]
+        sources_block = "\n".join(source_lines)
+        content = search_result.answer
+        if sources_block:
+            content = f"{content}\n\nSources:\n{sources_block}"
+
+        return ChatCompletion(
+            content=content,
+            provider_id=search_result.provider_id,
+            model_id="web-search-v1",
+        )
+
+    @staticmethod
+    def _is_search_request(content: str) -> bool:
+        normalized = content.strip().lower()
+        if normalized.startswith("search "):
+            return True
+
+        search_markers = ("look up ", "find on web ", "web search ", "search for ")
+        return any(marker in normalized for marker in search_markers)
+
+    def _try_run_search(self, content: str, settings_payload: dict) -> SearchResult | None:
+        if not self._is_search_request(content):
+            return None
+
+        search_settings = settings_payload.get("search_settings", {})
+        if not isinstance(search_settings, dict):
+            search_settings = {}
+        enabled = bool(search_settings.get("enabled", False))
+        if not enabled:
+            return SearchResult(
+                query=content.strip(),
+                answer=(
+                    "Web search is currently turned off in Settings. "
+                    "Open Settings → Search and enable it, then try again."
+                ),
+                provider_id="search-disabled",
+                sources=[],
+            )
+
+        provider_id = str(search_settings.get("provider_id", "duckduckgo")).strip() or "duckduckgo"
+        endpoint = str(search_settings.get("endpoint", "https://api.duckduckgo.com/")).strip()
+        if not endpoint:
+            return SearchResult(
+                query=content.strip(),
+                answer=(
+                    "Search is enabled, but no search endpoint is configured yet. "
+                    "Add an endpoint in Settings → Search (for DuckDuckGo, use https://api.duckduckgo.com/)."
+                ),
+                provider_id="search-misconfigured",
+                sources=[],
+            )
+
+        try:
+            adapter = create_search_adapter(provider_id=provider_id, endpoint=endpoint)
+            return adapter.search(content.strip())
+        except ValueError as ex:
+            return SearchResult(
+                query=content.strip(),
+                answer=(
+                    f"I couldn't use search provider '{provider_id}'. {ex} "
+                    "Choose duckduckgo for now while provider support is still minimal."
+                ),
+                provider_id="search-misconfigured",
+                sources=[],
+            )
+        except (OSError, TimeoutError, json.JSONDecodeError):
+            return SearchResult(
+                query=content.strip(),
+                answer=(
+                    "I couldn't reach the web search service right now. "
+                    "Please check your network connection and try again."
+                ),
+                provider_id=provider_id,
+                sources=[],
+            )
+
+    @staticmethod
+    def _to_search_result_dto(search_result: SearchResult | None):
+        if search_result is None:
+            return pb2.SearchResultDto()
+
+        return pb2.SearchResultDto(
+            query=search_result.query,
+            answer=search_result.answer,
+            provider_id=search_result.provider_id,
+            sources=[pb2.SearchSourceDto(title=item.title, url=item.url) for item in search_result.sources],
         )
 
     def AttachWorkspaceRoot(self, request, context):

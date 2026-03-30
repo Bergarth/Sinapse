@@ -30,6 +30,17 @@
                 </StackPanel>
 
                 <StackPanel Spacing="8">
+                    <TextBlock Text="Web search" FontWeight="SemiBold" />
+                    <CheckBox Content="Enable web search in chat" IsChecked="{x:Bind ViewModel.IsSearchEnabled, Mode=TwoWay}" />
+                    <TextBlock Text="First implementation uses a simple provider adapter and returns source links in chat responses." Opacity="0.8" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBox Width="180" Header="Provider ID" Text="{x:Bind ViewModel.SearchProviderId, Mode=TwoWay}" />
+                        <TextBox Width="320" Header="Endpoint" Text="{x:Bind ViewModel.SearchEndpoint, Mode=TwoWay}" />
+                    </StackPanel>
+                    <TextBox Header="API key placeholder ref (optional)" PlaceholderText="placeholder://provider/key-id" Text="{x:Bind ViewModel.SearchApiKeyPlaceholderRef, Mode=TwoWay}" />
+                </StackPanel>
+
+                <StackPanel Spacing="8">
                     <TextBlock Text="Configured providers" FontWeight="SemiBold" />
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <TextBox Width="220" PlaceholderText="Provider name (for example: OpenAI)" Text="{x:Bind ViewModel.NewProviderName, Mode=TwoWay}" />
