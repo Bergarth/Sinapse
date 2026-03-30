@@ -23,6 +23,7 @@
                                     <StackPanel Spacing="2">
                                         <TextBlock FontWeight="SemiBold" Text="{x:Bind SenderName, Mode=OneWay}" />
                                         <TextBlock Text="{x:Bind Content, Mode=OneWay}" TextWrapping="Wrap" />
+                                        <TextBlock Opacity="0.75" FontSize="12" Text="{x:Bind HandlerLabel, Mode=OneWay}" />
                                         <TextBlock Opacity="0.7" FontSize="12" Text="{x:Bind Timestamp, Mode=OneWay}" />
                                     </StackPanel>
                                 </Border>

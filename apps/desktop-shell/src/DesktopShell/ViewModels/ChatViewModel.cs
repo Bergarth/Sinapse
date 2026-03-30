@@ -37,6 +37,8 @@ public sealed class ChatMessageViewModel
     public required string Timestamp { get; init; }
 
     public bool IsAssistant { get; init; }
+
+    public required string HandlerLabel { get; init; }
 }
 
 public class ChatViewModel : INotifyPropertyChanged
@@ -267,7 +269,20 @@ public class ChatViewModel : INotifyPropertyChanged
             Content = message.Content,
             Timestamp = message.CreatedAt,
             IsAssistant = message.Role == MessageRole.Assistant,
+            HandlerLabel = BuildHandlerLabel(message),
         };
+    }
+
+    private static string BuildHandlerLabel(ChatMessageDto message)
+    {
+        if (message.Role != MessageRole.Assistant)
+        {
+            return string.Empty;
+        }
+
+        var provider = string.IsNullOrWhiteSpace(message.ProviderId) ? "unknown-provider" : message.ProviderId;
+        var model = string.IsNullOrWhiteSpace(message.ModelId) ? "unknown-model" : message.ModelId;
+        return $"Handled by {provider} · {model}";
     }
 
     private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)

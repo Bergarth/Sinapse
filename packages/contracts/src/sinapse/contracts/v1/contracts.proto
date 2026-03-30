@@ -130,6 +130,8 @@ message ChatMessageDto {
   MessageRole role = 3;
   string content = 4;
   string created_at = 5;
+  string provider_id = 6;
+  string model_id = 7;
 }
 
 message WorkspaceRootDto {
