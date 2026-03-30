@@ -1,0 +1,20 @@
+[project]
+name = "agent-daemon"
+version = "0.1.0"
+description = "Placeholder Python service scaffold for the agent daemon"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+agent-daemon = "agent_daemon.main:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
