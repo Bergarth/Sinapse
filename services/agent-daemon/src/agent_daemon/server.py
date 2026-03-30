@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
+import threading
+import time
 import uuid
 from concurrent import futures
 from datetime import UTC, datetime
@@ -14,7 +17,13 @@ from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 from agent_daemon.contracts_runtime import load_contract_modules
 from agent_daemon.logging_utils import set_correlation_id
-from agent_daemon.services.memory import ConversationRecord, MemoryService, MessageRecord
+from agent_daemon.services.memory import (
+    ConversationRecord,
+    MemoryService,
+    MessageRecord,
+    TaskRecord,
+    TaskStepRecord,
+)
 
 pb2, pb2_grpc = load_contract_modules()
 
@@ -82,6 +91,8 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
 
     def __init__(self, memory_service: MemoryService) -> None:
         self._memory = memory_service
+        self._event_subscribers: list[queue.Queue] = []
+        self._event_subscribers_lock = threading.Lock()
 
     def _now(self) -> str:
         return datetime.now(UTC).isoformat()
@@ -111,6 +122,45 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             content=message.content,
             created_at=message.created_at,
         )
+
+    @staticmethod
+    def _to_task_dto(task: TaskRecord):
+        return pb2.TaskSummaryDto(
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            task_status=task.task_status,
+            approval_status=task.approval_status,
+            title=task.title,
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+        )
+
+    def _publish_task_event(
+        self,
+        *,
+        task_id: str,
+        event_type: int,
+        task_status: int,
+        title: str,
+        detail: str,
+        step_id: str = "",
+    ) -> None:
+        observed_at = self._now()
+        event = pb2.TaskTimelineEvent(
+            task_id=task_id,
+            step_id=step_id,
+            title=title,
+            detail=detail,
+            event_type=event_type,
+            task_status=task_status,
+            observed_at=observed_at,
+        )
+
+        with self._event_subscribers_lock:
+            subscribers = list(self._event_subscribers)
+
+        for subscriber in subscribers:
+            subscriber.put(event)
 
     def _ensure_conversation(self, conversation_id: str, title: str = "Chat") -> ConversationRecord:
         if conversation_id:
@@ -231,18 +281,39 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         )
 
     def StartTask(self, request, context):
-        _ = (request, context)
-        return pb2.StartTaskResponse(
-            task=pb2.TaskSummaryDto(
-                task_id="task-placeholder",
-                conversation_id=request.conversation_id,
-                task_status=pb2.TASK_STATUS_PENDING,
-                approval_status=pb2.APPROVAL_STATUS_REQUIRED,
-                title=request.title or "Placeholder task",
-                created_at=self._now(),
-                updated_at=self._now(),
+        _ = context
+        conversation = self._ensure_conversation(
+            request.conversation_id,
+            title="Task conversation",
+        )
+        now = self._now()
+        task_id = f"task-{uuid.uuid4().hex[:8]}"
+        task = self._memory.upsert_task(
+            TaskRecord(
+                task_id=task_id,
+                conversation_id=conversation.conversation_id,
+                task_status=pb2.TASK_STATUS_RUNNING,
+                approval_status=pb2.APPROVAL_STATUS_PENDING,
+                title=request.title or "Run first task flow",
+                created_at=now,
+                updated_at=now,
             )
         )
+        self._publish_task_event(
+            task_id=task.task_id,
+            event_type=pb2.TASK_EVENT_TYPE_TASK_STARTED,
+            task_status=task.task_status,
+            title=task.title,
+            detail="Task started. Setting up first-time placeholder execution.",
+        )
+
+        executor = threading.Thread(
+            target=self._run_placeholder_task,
+            args=(task.task_id,),
+            daemon=True,
+        )
+        executor.start()
+        return pb2.StartTaskResponse(task=self._to_task_dto(task))
 
     def ApproveStep(self, request, context):
         _ = context
@@ -297,37 +368,162 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         )
 
     def ObserveSystemState(self, request, context):
-        _ = (request, context)
+        event_queue: queue.Queue = queue.Queue()
+        with self._event_subscribers_lock:
+            self._event_subscribers.append(event_queue)
+
+        initial_tasks = [self._to_task_dto(task) for task in self._memory.list_tasks()]
         yield pb2.SystemStateEvent(
-            event_id="event-placeholder",
+            event_id=f"event-{uuid.uuid4().hex[:8]}",
             observed_at=self._now(),
             workspace=pb2.WorkspaceDto(
-                workspace_id=request.workspace_id or "workspace-placeholder",
-                root_path="/workspace",
-                active_task_id="task-placeholder",
+                workspace_id=request.workspace_id or "desktop-shell-workspace",
+                root_path="/workspace/Sinapse",
+                active_task_id=initial_tasks[0].task_id if initial_tasks else "",
                 created_at=self._now(),
                 updated_at=self._now(),
             ),
-            tasks=[
-                pb2.TaskSummaryDto(
-                    task_id="task-placeholder",
-                    conversation_id="conv-placeholder",
-                    task_status=pb2.TASK_STATUS_RUNNING,
-                    approval_status=pb2.APPROVAL_STATUS_PENDING,
-                    title="Placeholder observed task",
-                    created_at=self._now(),
-                    updated_at=self._now(),
-                )
-            ],
+            tasks=initial_tasks,
             services=[
                 pb2.ServiceHealthDto(
                     service_name="agent-daemon",
                     status=pb2.HEALTH_STATUS_HEALTHY,
                     observed_at=self._now(),
-                    detail="placeholder event snapshot",
+                    detail="stream connected",
                 )
             ],
         )
+
+        try:
+            while context.is_active():
+                try:
+                    timeline_event = event_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+                yield pb2.SystemStateEvent(
+                    event_id=f"event-{uuid.uuid4().hex[:8]}",
+                    observed_at=self._now(),
+                    workspace=pb2.WorkspaceDto(
+                        workspace_id=request.workspace_id or "desktop-shell-workspace",
+                        root_path="/workspace/Sinapse",
+                        active_task_id=timeline_event.task_id,
+                        created_at=self._now(),
+                        updated_at=self._now(),
+                    ),
+                    tasks=[self._to_task_dto(task) for task in self._memory.list_tasks()[:5]],
+                    services=[
+                        pb2.ServiceHealthDto(
+                            service_name="agent-daemon",
+                            status=pb2.HEALTH_STATUS_HEALTHY,
+                            observed_at=self._now(),
+                            detail="task timeline update",
+                        )
+                    ],
+                    task_timeline_events=[timeline_event],
+                )
+        finally:
+            with self._event_subscribers_lock:
+                self._event_subscribers = [item for item in self._event_subscribers if item is not event_queue]
+
+    def _run_placeholder_task(self, task_id: str) -> None:
+        task = self._memory.get_task(task_id)
+        if task is None:
+            return
+
+        fake_steps = [
+            "Understanding your request",
+            "Preparing a safe placeholder plan",
+            "Finalizing timeline output",
+        ]
+
+        try:
+            for index, step_title in enumerate(fake_steps, start=1):
+                started_at = self._now()
+                step_id = f"{task_id}-step-{index}"
+                self._memory.upsert_task_step(
+                    TaskStepRecord(
+                        step_id=step_id,
+                        task_id=task_id,
+                        sequence_number=index,
+                        title=step_title,
+                        status="running",
+                        detail="In progress",
+                        created_at=started_at,
+                        updated_at=started_at,
+                    )
+                )
+                self._publish_task_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type=pb2.TASK_EVENT_TYPE_STEP_STARTED,
+                    task_status=pb2.TASK_STATUS_RUNNING,
+                    title=step_title,
+                    detail="Started",
+                )
+                time.sleep(0.6)
+
+                finished_at = self._now()
+                self._memory.upsert_task_step(
+                    TaskStepRecord(
+                        step_id=step_id,
+                        task_id=task_id,
+                        sequence_number=index,
+                        title=step_title,
+                        status="completed",
+                        detail="Done",
+                        created_at=started_at,
+                        updated_at=finished_at,
+                    )
+                )
+                self._publish_task_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
+                    task_status=pb2.TASK_STATUS_RUNNING,
+                    title=step_title,
+                    detail="Completed successfully",
+                )
+
+            completed_at = self._now()
+            completed_task = self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_COMPLETED,
+                    approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=completed_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FINISHED,
+                task_status=completed_task.task_status,
+                title=completed_task.title,
+                detail="Task finished. Placeholder flow complete.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            failed_at = self._now()
+            self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_FAILED,
+                    approval_status=pb2.APPROVAL_STATUS_PENDING,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=failed_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                task_status=pb2.TASK_STATUS_FAILED,
+                title=task.title,
+                detail=f"Task failed: {exc}",
+            )
 
 
 def create_server() -> grpc.Server:

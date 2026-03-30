@@ -1,5 +1,6 @@
 using DesktopShell.Services;
 using DesktopShell.ViewModels;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 
 namespace DesktopShell;
@@ -16,6 +17,7 @@ public partial class App : Application
     public ChatViewModel ChatViewModel { get; private set; } = null!;
 
     public SidebarViewModel SidebarViewModel { get; private set; } = null!;
+    public TaskTimelineViewModel TaskTimelineViewModel { get; private set; } = null!;
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -23,9 +25,14 @@ public partial class App : Application
 
         ChatViewModel = new ChatViewModel(DaemonConnectionService);
         SidebarViewModel = new SidebarViewModel(DaemonConnectionService);
+        TaskTimelineViewModel = new TaskTimelineViewModel(
+            DaemonConnectionService,
+            DispatcherQueue.GetForCurrentThread()!);
 
         ChatViewModel.ConversationChanged += (_, conversationId) => SidebarViewModel.MarkSelectedConversation(conversationId);
+        ChatViewModel.ConversationChanged += (_, conversationId) => TaskTimelineViewModel.SetConversationId(conversationId);
         SidebarViewModel.ConversationSelected += async (_, conversationId) => await ChatViewModel.LoadConversationAsync(conversationId);
+        SidebarViewModel.ConversationSelected += (_, conversationId) => TaskTimelineViewModel.SetConversationId(conversationId);
 
         var mainWindowViewModel = new MainWindowViewModel(DaemonConnectionService);
         var window = new MainWindow(mainWindowViewModel);
@@ -33,5 +40,6 @@ public partial class App : Application
 
         await mainWindowViewModel.RefreshConnectionStatusAsync();
         await SidebarViewModel.RefreshConversationsAsync();
+        _ = TaskTimelineViewModel.BeginObservingAsync();
     }
 }

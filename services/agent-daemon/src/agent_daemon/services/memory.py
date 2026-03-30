@@ -1,4 +1,4 @@
-"""SQLite-backed memory service for conversations and messages."""
+"""SQLite-backed memory service for conversations, tasks, and steps."""
 
 from __future__ import annotations
 
@@ -22,6 +22,29 @@ class MessageRecord:
     role: int
     content: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class TaskRecord:
+    task_id: str
+    conversation_id: str
+    task_status: int
+    approval_status: int
+    title: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class TaskStepRecord:
+    step_id: str
+    task_id: str
+    sequence_number: int
+    title: str
+    status: str
+    detail: str
+    created_at: str
+    updated_at: str
 
 
 class MemoryService:
@@ -182,3 +205,141 @@ class MemoryService:
             )
             for row in rows
         ]
+
+    def upsert_task(self, task: TaskRecord) -> TaskRecord:
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT created_at FROM tasks WHERE task_id = ?",
+                (task.task_id,),
+            ).fetchone()
+
+            created_at = task.created_at
+            if existing is not None:
+                created_at = str(existing["created_at"])
+
+            connection.execute(
+                """
+                INSERT INTO tasks (task_id, conversation_id, task_status, approval_status, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id)
+                DO UPDATE SET
+                  conversation_id = excluded.conversation_id,
+                  task_status = excluded.task_status,
+                  approval_status = excluded.approval_status,
+                  title = excluded.title,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    task.task_id,
+                    task.conversation_id,
+                    task.task_status,
+                    task.approval_status,
+                    task.title,
+                    created_at,
+                    task.updated_at,
+                ),
+            )
+            connection.commit()
+
+        return TaskRecord(
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            task_status=task.task_status,
+            approval_status=task.approval_status,
+            title=task.title,
+            created_at=created_at,
+            updated_at=task.updated_at,
+        )
+
+    def get_task(self, task_id: str) -> TaskRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT task_id, conversation_id, task_status, approval_status, title, created_at, updated_at
+                FROM tasks
+                WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+
+        return TaskRecord(
+            task_id=str(row["task_id"]),
+            conversation_id=str(row["conversation_id"]),
+            task_status=int(row["task_status"]),
+            approval_status=int(row["approval_status"]),
+            title=str(row["title"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def list_tasks(self) -> list[TaskRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT task_id, conversation_id, task_status, approval_status, title, created_at, updated_at
+                FROM tasks
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+
+        return [
+            TaskRecord(
+                task_id=str(row["task_id"]),
+                conversation_id=str(row["conversation_id"]),
+                task_status=int(row["task_status"]),
+                approval_status=int(row["approval_status"]),
+                title=str(row["title"]),
+                created_at=str(row["created_at"]),
+                updated_at=str(row["updated_at"]),
+            )
+            for row in rows
+        ]
+
+    def upsert_task_step(self, step: TaskStepRecord) -> TaskStepRecord:
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT created_at FROM task_steps WHERE step_id = ?",
+                (step.step_id,),
+            ).fetchone()
+
+            created_at = step.created_at
+            if existing is not None:
+                created_at = str(existing["created_at"])
+
+            connection.execute(
+                """
+                INSERT INTO task_steps (step_id, task_id, sequence_number, title, status, detail, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(step_id)
+                DO UPDATE SET
+                  sequence_number = excluded.sequence_number,
+                  title = excluded.title,
+                  status = excluded.status,
+                  detail = excluded.detail,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    step.step_id,
+                    step.task_id,
+                    step.sequence_number,
+                    step.title,
+                    step.status,
+                    step.detail,
+                    created_at,
+                    step.updated_at,
+                ),
+            )
+            connection.commit()
+
+        return TaskStepRecord(
+            step_id=step.step_id,
+            task_id=step.task_id,
+            sequence_number=step.sequence_number,
+            title=step.title,
+            status=step.status,
+            detail=step.detail,
+            created_at=created_at,
+            updated_at=step.updated_at,
+        )
