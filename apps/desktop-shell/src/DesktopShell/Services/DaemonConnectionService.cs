@@ -38,6 +38,7 @@ public sealed class DaemonConnectionService
                 EnvironmentStatus: response.System.Detail,
                 EnvironmentName: response.System.Environment,
                 LastSuccessfulConnectionUtc: lastSuccessfulConnectionUtc,
+                Capabilities: response.Capabilities,
                 ErrorMessage: null);
         }
         catch (RpcException ex)
@@ -353,6 +354,7 @@ public sealed class DaemonConnectionService
             EnvironmentStatus: "Unavailable",
             EnvironmentName: "unknown",
             LastSuccessfulConnectionUtc: null,
+            Capabilities: [],
             ErrorMessage: $"Could not connect to daemon: {errorDetail}");
     }
 }
@@ -365,6 +367,7 @@ public sealed record DaemonConnectionResult(
     string EnvironmentStatus,
     string EnvironmentName,
     DateTimeOffset? LastSuccessfulConnectionUtc,
+    IReadOnlyList<CapabilityStatusDto> Capabilities,
     string? ErrorMessage);
 
 public sealed record SendMessageResult(

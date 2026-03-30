@@ -18,6 +18,7 @@ from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 from agent_daemon.contracts_runtime import load_contract_modules
 from agent_daemon.logging_utils import set_correlation_id
+from agent_daemon.windows_operator_runtime import load_windows_operator_service_class
 from agent_daemon.services.memory import (
     AppSettingRecord,
     ConversationRecord,
@@ -93,8 +94,9 @@ class CorrelationIdInterceptor(grpc.ServerInterceptor):
 class DaemonContractService(pb2_grpc.DaemonContractServicer):
     """Daemon contract service with SQLite-backed conversation/message persistence."""
 
-    def __init__(self, memory_service: MemoryService) -> None:
+    def __init__(self, memory_service: MemoryService, windows_operator_service) -> None:
         self._memory = memory_service
+        self._windows_operator = windows_operator_service
         self._event_subscribers: list[queue.Queue] = []
         self._event_subscribers_lock = threading.Lock()
 
@@ -303,6 +305,31 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             )
         )
 
+    def _capabilities(self):
+        operator = self._windows_operator.availability()
+        return [
+            pb2.CapabilityStatusDto(
+                capability_name="chat",
+                is_available=True,
+                detail="Conversation loop scaffold is available.",
+            ),
+            pb2.CapabilityStatusDto(
+                capability_name="tasks",
+                is_available=True,
+                detail="Task timeline scaffold is available.",
+            ),
+            pb2.CapabilityStatusDto(
+                capability_name="workspaces",
+                is_available=True,
+                detail="Workspace root attachment scaffold is available.",
+            ),
+            pb2.CapabilityStatusDto(
+                capability_name="windows operator",
+                is_available=operator.is_available,
+                detail=operator.detail,
+            ),
+        ]
+
     def HealthCheck(self, request, context):
         _ = (request, context)
         observed_at = self._now()
@@ -326,6 +353,7 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 observed_at=observed_at,
                 detail=f"python {os.sys.version.split()[0]}",
             ),
+            capabilities=self._capabilities(),
         )
 
     def GetAppSettings(self, request, context):
@@ -795,8 +823,13 @@ def create_server() -> grpc.Server:
         str(repo_root / ".sinapse" / "memory.db"),
     )
     memory_service = MemoryService(database_path=database_path, migrations_path=migrations_path)
+    windows_operator_service_class = load_windows_operator_service_class()
+    windows_operator_service = windows_operator_service_class()
 
-    pb2_grpc.add_DaemonContractServicer_to_server(DaemonContractService(memory_service), server)
+    pb2_grpc.add_DaemonContractServicer_to_server(
+        DaemonContractService(memory_service, windows_operator_service),
+        server,
+    )
 
     health_servicer = health.HealthServicer()
     health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)

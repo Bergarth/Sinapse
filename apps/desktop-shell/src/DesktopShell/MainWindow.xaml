@@ -31,6 +31,15 @@
                 <TextBlock Text="{x:Bind ViewModel.EnvironmentStatus, Mode=OneWay, StringFormat='Environment status: {0}'}" TextWrapping="Wrap" />
                 <TextBlock Text="{x:Bind ViewModel.LastSuccessfulConnection, Mode=OneWay, StringFormat='Last successful connection: {0}'}" />
 
+                <TextBlock FontSize="16" FontWeight="SemiBold" Text="Available capabilities" />
+                <ItemsRepeater ItemsSource="{x:Bind ViewModel.CapabilityStatuses, Mode=OneWay}">
+                    <ItemsRepeater.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding}" TextWrapping="Wrap" />
+                        </DataTemplate>
+                    </ItemsRepeater.ItemTemplate>
+                </ItemsRepeater>
+
                 <Button Content="Retry connection check" Click="RetryConnectionCheck_Click" HorizontalAlignment="Left" />
             </StackPanel>
         </Border>

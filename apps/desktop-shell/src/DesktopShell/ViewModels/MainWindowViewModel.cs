@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using DesktopShell.Services;
@@ -24,6 +25,14 @@ public class MainWindowViewModel : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public string AppTitle { get; } = "Desktop Shell";
+
+    public ObservableCollection<string> CapabilityStatuses { get; } =
+    [
+        "chat — checking...",
+        "tasks — checking...",
+        "workspaces — checking...",
+        "windows operator — checking...",
+    ];
 
     public string DaemonStatus
     {
@@ -84,6 +93,23 @@ public class MainWindowViewModel : INotifyPropertyChanged
         EnvironmentName = result.EnvironmentName;
         ConnectionDetail = result.ErrorMessage ?? $"Connected to {result.Endpoint}";
         LastSuccessfulConnection = result.LastSuccessfulConnectionUtc?.ToLocalTime().ToString("u") ?? "Never";
+
+        CapabilityStatuses.Clear();
+        if (result.Capabilities.Count == 0)
+        {
+            CapabilityStatuses.Add("chat — unavailable");
+            CapabilityStatuses.Add("tasks — unavailable");
+            CapabilityStatuses.Add("workspaces — unavailable");
+            CapabilityStatuses.Add("windows operator — unavailable");
+        }
+        else
+        {
+            foreach (var capability in result.Capabilities)
+            {
+                var availability = capability.IsAvailable ? "available" : "unavailable";
+                CapabilityStatuses.Add($"{capability.CapabilityName} — {availability} ({capability.Detail})");
+            }
+        }
 
         OnPropertyChanged(nameof(ConnectionIndicatorEmoji));
     }
