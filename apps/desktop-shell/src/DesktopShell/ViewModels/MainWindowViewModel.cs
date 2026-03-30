@@ -8,8 +8,12 @@ public class MainWindowViewModel : INotifyPropertyChanged
 {
     private readonly DaemonConnectionService _daemonConnectionService;
 
-    private string _connectionStatus = "Checking...";
+    private string _daemonStatus = "Checking daemon...";
+    private string _daemonVersion = "-";
+    private string _environmentStatus = "Checking environment...";
+    private string _environmentName = "-";
     private string _connectionDetail = "Trying to contact the daemon during startup.";
+    private string _lastSuccessfulConnection = "Never";
     private bool _isConnected;
 
     public MainWindowViewModel(DaemonConnectionService daemonConnectionService)
@@ -21,10 +25,34 @@ public class MainWindowViewModel : INotifyPropertyChanged
 
     public string AppTitle { get; } = "Desktop Shell";
 
-    public string ConnectionStatus
+    public string DaemonStatus
     {
-        get => _connectionStatus;
-        private set => SetProperty(ref _connectionStatus, value);
+        get => _daemonStatus;
+        private set => SetProperty(ref _daemonStatus, value);
+    }
+
+    public string DaemonVersion
+    {
+        get => _daemonVersion;
+        private set => SetProperty(ref _daemonVersion, value);
+    }
+
+    public string EnvironmentStatus
+    {
+        get => _environmentStatus;
+        private set => SetProperty(ref _environmentStatus, value);
+    }
+
+    public string EnvironmentName
+    {
+        get => _environmentName;
+        private set => SetProperty(ref _environmentName, value);
+    }
+
+    public string LastSuccessfulConnection
+    {
+        get => _lastSuccessfulConnection;
+        private set => SetProperty(ref _lastSuccessfulConnection, value);
     }
 
     public string ConnectionDetail
@@ -43,15 +71,19 @@ public class MainWindowViewModel : INotifyPropertyChanged
 
     public async Task RefreshConnectionStatusAsync(CancellationToken cancellationToken = default)
     {
-        ConnectionStatus = "Checking...";
-        ConnectionDetail = "Running a daemon health check from the shell.";
+        DaemonStatus = "Checking daemon...";
+        EnvironmentStatus = "Checking environment...";
+        ConnectionDetail = "Requesting startup status from daemon.";
 
-        var result = await _daemonConnectionService.CheckHealthAsync(cancellationToken);
+        var result = await _daemonConnectionService.GetStartupStatusAsync(cancellationToken);
 
         IsConnected = result.IsConnected;
-        ConnectionStatus = result.StatusMessage;
-        ConnectionDetail = result.ErrorMessage
-            ?? $"Daemon is reachable at {result.Endpoint}.";
+        DaemonStatus = result.DaemonStatus;
+        DaemonVersion = result.DaemonVersion;
+        EnvironmentStatus = result.EnvironmentStatus;
+        EnvironmentName = result.EnvironmentName;
+        ConnectionDetail = result.ErrorMessage ?? $"Connected to {result.Endpoint}";
+        LastSuccessfulConnection = result.LastSuccessfulConnectionUtc?.ToLocalTime().ToString("u") ?? "Never";
 
         OnPropertyChanged(nameof(ConnectionIndicatorEmoji));
     }

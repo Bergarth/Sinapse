@@ -57,6 +57,13 @@ message ServiceHealthDto {
   string detail = 4;
 }
 
+message SystemStatusDto {
+  string environment = 1;
+  HealthStatus status = 2;
+  string observed_at = 3;
+  string detail = 4;
+}
+
 message TaskSummaryDto {
   string task_id = 1;
   string conversation_id = 2;
@@ -74,6 +81,8 @@ message HealthCheckRequest {
 message HealthCheckResponse {
   ServiceHealthDto daemon = 1;
   ServiceHealthDto shell = 2;
+  string daemon_version = 3;
+  SystemStatusDto system = 4;
 }
 
 message StartConversationRequest {

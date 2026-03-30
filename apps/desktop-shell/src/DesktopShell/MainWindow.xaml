@@ -15,12 +15,22 @@
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0" Margin="12,12,12,0" Padding="12" BorderBrush="Gray" BorderThickness="1" CornerRadius="8">
-            <StackPanel Spacing="6">
-                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Daemon connection" />
-                <TextBlock Text="This startup check confirms whether the shell can reach the daemon." TextWrapping="Wrap" />
-                <TextBlock Text="{x:Bind ViewModel.ConnectionIndicatorEmoji, Mode=OneWay}" FontSize="18" />
-                <TextBlock Text="{x:Bind ViewModel.ConnectionStatus, Mode=OneWay}" FontSize="16" FontWeight="SemiBold" />
+            <StackPanel Spacing="8">
+                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Startup status" />
+                <TextBlock Text="The shell requests daemon and environment status at startup." TextWrapping="Wrap" />
+
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="{x:Bind ViewModel.ConnectionIndicatorEmoji, Mode=OneWay}" FontSize="18" />
+                    <TextBlock Text="Daemon:" FontWeight="SemiBold" />
+                    <TextBlock Text="{x:Bind ViewModel.DaemonStatus, Mode=OneWay}" />
+                </StackPanel>
+
                 <TextBlock Text="{x:Bind ViewModel.ConnectionDetail, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.DaemonVersion, Mode=OneWay, StringFormat='Daemon version: {0}'}" />
+                <TextBlock Text="{x:Bind ViewModel.EnvironmentName, Mode=OneWay, StringFormat='Environment: {0}'}" />
+                <TextBlock Text="{x:Bind ViewModel.EnvironmentStatus, Mode=OneWay, StringFormat='Environment status: {0}'}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.LastSuccessfulConnection, Mode=OneWay, StringFormat='Last successful connection: {0}'}" />
+
                 <Button Content="Retry connection check" Click="RetryConnectionCheck_Click" HorizontalAlignment="Left" />
             </StackPanel>
         </Border>

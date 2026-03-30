@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from concurrent import futures
 from datetime import UTC, datetime
 
@@ -81,18 +82,26 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
 
     def HealthCheck(self, request, context):
         _ = (request, context)
+        observed_at = self._now()
         return pb2.HealthCheckResponse(
             daemon=pb2.ServiceHealthDto(
                 service_name="agent-daemon",
                 status=pb2.HEALTH_STATUS_HEALTHY,
-                observed_at=self._now(),
-                detail="placeholder health check",
+                observed_at=observed_at,
+                detail="daemon grpc service is ready",
             ),
             shell=pb2.ServiceHealthDto(
-                service_name="agent-shell",
-                status=pb2.HEALTH_STATUS_DEGRADED,
-                observed_at=self._now(),
-                detail="shell dependency not wired yet",
+                service_name="desktop-shell",
+                status=pb2.HEALTH_STATUS_HEALTHY,
+                observed_at=observed_at,
+                detail="shell requested startup health",
+            ),
+            daemon_version=os.environ.get("AGENT_DAEMON_VERSION", "0.1.0-dev"),
+            system=pb2.SystemStatusDto(
+                environment=os.environ.get("AGENT_ENVIRONMENT", "development"),
+                status=pb2.HEALTH_STATUS_HEALTHY,
+                observed_at=observed_at,
+                detail=f"python {os.sys.version.split()[0]}",
             ),
         )
 
