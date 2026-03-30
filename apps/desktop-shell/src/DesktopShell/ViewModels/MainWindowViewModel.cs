@@ -28,10 +28,11 @@ public class MainWindowViewModel : INotifyPropertyChanged
 
     public ObservableCollection<string> CapabilityStatuses { get; } =
     [
-        "chat — checking...",
-        "tasks — checking...",
-        "workspaces — checking...",
-        "windows operator — checking...",
+        "Chat assistant — checking...",
+        "Task tracking — checking...",
+        "Workspace files — checking...",
+        "Desktop app controls — checking...",
+        "Web browsing support — checking...",
     ];
 
     public string DaemonStatus
@@ -97,17 +98,19 @@ public class MainWindowViewModel : INotifyPropertyChanged
         CapabilityStatuses.Clear();
         if (result.Capabilities.Count == 0)
         {
-            CapabilityStatuses.Add("chat — unavailable");
-            CapabilityStatuses.Add("tasks — unavailable");
-            CapabilityStatuses.Add("workspaces — unavailable");
-            CapabilityStatuses.Add("windows operator — unavailable");
+            CapabilityStatuses.Add("Chat assistant — unavailable");
+            CapabilityStatuses.Add("Task tracking — unavailable");
+            CapabilityStatuses.Add("Workspace files — unavailable");
+            CapabilityStatuses.Add("Desktop app controls — unavailable");
+            CapabilityStatuses.Add("Web browsing support — unavailable");
         }
         else
         {
             foreach (var capability in result.Capabilities)
             {
-                var availability = capability.IsAvailable ? "available" : "unavailable";
-                CapabilityStatuses.Add($"{capability.CapabilityName} — {availability} ({capability.Detail})");
+                var availability = capability.IsAvailable ? "ready" : "not ready";
+                var label = ToFriendlyCapabilityLabel(capability.CapabilityName);
+                CapabilityStatuses.Add($"{label} — {availability}. {capability.Detail}");
             }
         }
 
@@ -128,5 +131,18 @@ public class MainWindowViewModel : INotifyPropertyChanged
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+
+    private static string ToFriendlyCapabilityLabel(string capabilityName)
+    {
+        return capabilityName.Trim().ToLowerInvariant() switch
+        {
+            "chat" => "Chat assistant",
+            "tasks" => "Task tracking",
+            "workspaces" => "Workspace files",
+            "windows operator" => "Desktop app controls",
+            "browser support" => "Web browsing support",
+            _ => capabilityName,
+        };
     }
 }
