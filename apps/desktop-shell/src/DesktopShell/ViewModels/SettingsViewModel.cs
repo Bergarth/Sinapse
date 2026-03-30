@@ -38,6 +38,7 @@ public class SettingsViewModel : INotifyPropertyChanged
     private string _searchProviderId = "duckduckgo";
     private string _searchEndpoint = "https://api.duckduckgo.com/";
     private string _searchApiKeyPlaceholderRef = string.Empty;
+    private bool _spokenRepliesEnabled;
 
     public SettingsViewModel(DaemonConnectionService daemonConnectionService)
     {
@@ -127,6 +128,12 @@ public class SettingsViewModel : INotifyPropertyChanged
     {
         get => _searchApiKeyPlaceholderRef;
         set => SetProperty(ref _searchApiKeyPlaceholderRef, value);
+    }
+
+    public bool SpokenRepliesEnabled
+    {
+        get => _spokenRepliesEnabled;
+        set => SetProperty(ref _spokenRepliesEnabled, value);
     }
 
     public async Task LoadAsync(CancellationToken cancellationToken = default)
@@ -247,6 +254,12 @@ public class SettingsViewModel : INotifyPropertyChanged
                 Endpoint = SearchEndpoint.Trim(),
                 ApiKeyPlaceholderRef = SearchApiKeyPlaceholderRef.Trim(),
             },
+            SpeechSettings = new SpeechSettingsDto
+            {
+                SpokenRepliesEnabled = SpokenRepliesEnabled,
+                SttProviderId = "local-whisper",
+                TtsProviderId = "local-pyttsx3",
+            },
         };
 
         dto.Providers.AddRange(Providers.Select(provider => new ProviderConfigDto
@@ -287,6 +300,7 @@ public class SettingsViewModel : INotifyPropertyChanged
             ? "https://api.duckduckgo.com/"
             : settings.SearchSettings.Endpoint;
         SearchApiKeyPlaceholderRef = settings.SearchSettings?.ApiKeyPlaceholderRef ?? string.Empty;
+        SpokenRepliesEnabled = settings.SpeechSettings?.SpokenRepliesEnabled ?? false;
 
         Providers.Clear();
         foreach (var provider in settings.Providers)

@@ -47,6 +47,20 @@
                 <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" TextWrapping="Wrap" />
 
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Button
+                        Content="Hold to Talk"
+                        IsEnabled="{x:Bind ViewModel.CanUsePushToTalk, Mode=OneWay}"
+                        Click="PushToTalk_Click"
+                        PointerPressed="PushToTalk_PointerPressed"
+                        PointerReleased="PushToTalk_PointerReleased"
+                        PointerCanceled="PushToTalk_PointerReleased"
+                        PointerCaptureLost="PushToTalk_PointerReleased" />
+                    <ProgressRing Width="20" Height="20" IsActive="{x:Bind ViewModel.IsPushToTalkListening, Mode=OneWay}" />
+                    <ProgressRing Width="20" Height="20" IsActive="{x:Bind ViewModel.IsPushToTalkTranscribing, Mode=OneWay}" />
+                    <TextBlock Text="{x:Bind ViewModel.PushToTalkStatusText, Mode=OneWay}" TextWrapping="Wrap" Width="420" />
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <ProgressRing Width="20" Height="20" IsActive="{x:Bind ViewModel.IsSending, Mode=OneWay}" />
                     <TextBox
                         Width="520"

@@ -41,6 +41,12 @@
                 </StackPanel>
 
                 <StackPanel Spacing="8">
+                    <TextBlock Text="Voice output" FontWeight="SemiBold" />
+                    <CheckBox Content="Speak assistant replies aloud" IsChecked="{x:Bind ViewModel.SpokenRepliesEnabled, Mode=TwoWay}" />
+                    <TextBlock Text="Optional and off by default. If local speech dependencies are missing, chat still works normally." Opacity="0.8" TextWrapping="Wrap" />
+                </StackPanel>
+
+                <StackPanel Spacing="8">
                     <TextBlock Text="Configured providers" FontWeight="SemiBold" />
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <TextBox Width="220" PlaceholderText="Provider name (for example: OpenAI)" Text="{x:Bind ViewModel.NewProviderName, Mode=TwoWay}" />

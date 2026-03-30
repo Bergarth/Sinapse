@@ -1,3 +1,4 @@
+using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Sinapse.Contracts.V1;
@@ -373,6 +374,65 @@ public sealed class DaemonConnectionService
         }
     }
 
+
+    public async Task<TranscribeAudioResult> TranscribeAudioAsync(byte[] audioWav, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            var response = await client.TranscribeAudioAsync(
+                new TranscribeAudioRequest
+                {
+                    AudioWav = ByteString.CopyFrom(audioWav),
+                    AudioMimeType = "audio/wav",
+                    RequestedBy = "desktop-shell",
+                },
+                cancellationToken: cancellationToken);
+
+            return new TranscribeAudioResult(true, response.Transcript, response.Detail, null);
+        }
+        catch (RpcException ex)
+        {
+            return new TranscribeAudioResult(false, string.Empty, string.Empty, $"Speech transcription error: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new TranscribeAudioResult(false, string.Empty, string.Empty, ex.Message);
+        }
+    }
+
+    public async Task<SynthesizeSpeechResult> SynthesizeSpeechAsync(string text, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            var response = await client.SynthesizeSpeechAsync(
+                new SynthesizeSpeechRequest
+                {
+                    Text = text,
+                    RequestedBy = "desktop-shell",
+                },
+                cancellationToken: cancellationToken);
+
+            return new SynthesizeSpeechResult(
+                true,
+                response.AudioWav.ToByteArray(),
+                string.IsNullOrWhiteSpace(response.AudioMimeType) ? "audio/wav" : response.AudioMimeType,
+                response.Detail,
+                null);
+        }
+        catch (RpcException ex)
+        {
+            return new SynthesizeSpeechResult(false, [], "audio/wav", string.Empty, $"Speech playback unavailable: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new SynthesizeSpeechResult(false, [], "audio/wav", string.Empty, ex.Message);
+        }
+    }
+
     public Task BeginSystemStateObservationAsync(
         Action<SystemStateEvent> onEvent,
         CancellationToken cancellationToken = default)
@@ -490,4 +550,18 @@ public sealed record GetAppSettingsResult(
 public sealed record UpdateAppSettingsResult(
     bool IsSuccess,
     AppSettingsDto? Settings,
+    string? ErrorMessage);
+
+
+public sealed record TranscribeAudioResult(
+    bool IsSuccess,
+    string Transcript,
+    string Detail,
+    string? ErrorMessage);
+
+public sealed record SynthesizeSpeechResult(
+    bool IsSuccess,
+    byte[] AudioBytes,
+    string AudioMimeType,
+    string Detail,
     string? ErrorMessage);

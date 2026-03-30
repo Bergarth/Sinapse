@@ -153,6 +153,12 @@ message SearchSettingsDto {
   string api_key_placeholder_ref = 4;
 }
 
+message SpeechSettingsDto {
+  bool spoken_replies_enabled = 1;
+  string stt_provider_id = 2;
+  string tts_provider_id = 3;
+}
+
 message WorkspaceRootDto {
   string root_id = 1;
   string conversation_id = 2;
@@ -186,6 +192,7 @@ message AppSettingsDto {
   repeated ApiKeyEntryDto api_key_entries = 4;
   string updated_at = 5;
   SearchSettingsDto search_settings = 6;
+  SpeechSettingsDto speech_settings = 7;
 }
 
 message CapabilityStatusDto {
@@ -231,6 +238,33 @@ message SendUserMessageResponse {
   ChatMessageDto user_message = 4;
   ChatMessageDto assistant_message = 5;
   SearchResultDto search_result = 6;
+}
+
+message TranscribeAudioRequest {
+  bytes audio_wav = 1;
+  string audio_mime_type = 2;
+  string requested_by = 3;
+}
+
+message TranscribeAudioResponse {
+  string transcript = 1;
+  string provider_id = 2;
+  string model_id = 3;
+  string detail = 4;
+}
+
+message SynthesizeSpeechRequest {
+  string text = 1;
+  string voice_id = 2;
+  string requested_by = 3;
+}
+
+message SynthesizeSpeechResponse {
+  bytes audio_wav = 1;
+  string audio_mime_type = 2;
+  string provider_id = 3;
+  string model_id = 4;
+  string detail = 5;
 }
 
 message AttachWorkspaceRootRequest {
@@ -365,6 +399,8 @@ service DaemonContract {
   rpc UpdateAppSettings(UpdateAppSettingsRequest) returns (UpdateAppSettingsResponse);
   rpc StartConversation(StartConversationRequest) returns (StartConversationResponse);
   rpc SendUserMessage(SendUserMessageRequest) returns (SendUserMessageResponse);
+  rpc TranscribeAudio(TranscribeAudioRequest) returns (TranscribeAudioResponse);
+  rpc SynthesizeSpeech(SynthesizeSpeechRequest) returns (SynthesizeSpeechResponse);
   rpc AttachWorkspaceRoot(AttachWorkspaceRootRequest) returns (AttachWorkspaceRootResponse);
   rpc GetConversationWorkspace(GetConversationWorkspaceRequest) returns (GetConversationWorkspaceResponse);
   rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
