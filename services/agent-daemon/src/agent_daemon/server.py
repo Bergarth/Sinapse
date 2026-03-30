@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -521,6 +522,8 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         search_result = None
         if self._is_list_windows_request(request.content):
             completion = self._build_windows_list_completion()
+        elif self._is_open_url_request(request.content):
+            completion = self._build_browser_open_completion(request.content)
         else:
             search_result = self._try_run_search(request.content, settings_payload)
             if search_result is None:
@@ -642,6 +645,71 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             content=content,
             provider_id="windows-operator",
             model_id="windows-readonly-v1",
+        )
+
+    @staticmethod
+    def _extract_url(content: str) -> str | None:
+        match = re.search(r"(https?://[^\s]+|(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s]*)", content)
+        if match is None:
+            return None
+        return match.group(1).rstrip(").,!?\"'")
+
+    def _is_open_url_request(self, content: str) -> bool:
+        normalized = content.strip().lower()
+        url = self._extract_url(content)
+        if url is None:
+            return False
+        markers = ("open ", "visit ", "go to ", "check ", "tell me what it says", "summarize")
+        return any(marker in normalized for marker in markers)
+
+    def _build_browser_open_completion(self, content: str) -> ChatCompletion:
+        url = self._extract_url(content)
+        if url is None:
+            return ChatCompletion(
+                content="I couldn't find a URL to open. Please share a link like https://example.com.",
+                provider_id="browser-operator",
+                model_id="browser-readonly-v1",
+            )
+
+        self._logger.info(
+            "running read-only browser open-url from chat request",
+            extra={"grpc_method": "SendUserMessage"},
+        )
+        try:
+            result = self._browser_operator.open_url(url=url)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.exception(
+                "browser open-url failed",
+                extra={"grpc_method": "SendUserMessage"},
+            )
+            return ChatCompletion(
+                content=(
+                    "I tried to open that page, but the browser operator hit an unexpected error. "
+                    f"Details: {exc}"
+                ),
+                provider_id="browser-operator",
+                model_id="browser-readonly-v1",
+            )
+
+        if not result.is_success or result.snapshot is None:
+            return ChatCompletion(
+                content=(
+                    "I couldn't open that page using the read-only browser operator.\n"
+                    f"Reason: {result.detail}"
+                ),
+                provider_id="browser-operator",
+                model_id="browser-readonly-v1",
+            )
+
+        content = (
+            f"Opened: {result.snapshot.url}\n"
+            f"Page title: {result.snapshot.title}\n"
+            f"Summary: {result.snapshot.summary}"
+        )
+        return ChatCompletion(
+            content=content,
+            provider_id="browser-operator",
+            model_id="browser-readonly-v1",
         )
 
     def _try_run_search(self, content: str, settings_payload: dict) -> SearchResult | None:
@@ -932,6 +1000,10 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         if task is None:
             return
 
+        if self._should_run_browser_open_task(task.title):
+            self._run_browser_open_task(task)
+            return
+
         if self._should_run_windows_enumeration_task(task.title):
             self._run_windows_enumeration_task(task)
             return
@@ -1029,6 +1101,22 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 title=task.title,
                 detail=f"Task failed: {exc}",
             )
+
+    @staticmethod
+    def _should_run_browser_open_task(task_title: str) -> bool:
+        normalized = task_title.strip().lower()
+        has_url = DaemonContractService._extract_url(task_title) is not None
+        mentions_browser = any(
+            marker in normalized
+            for marker in (
+                "open ",
+                "browser",
+                "website",
+                "web page",
+                "url",
+            )
+        )
+        return has_url and mentions_browser
 
     @staticmethod
     def _should_run_windows_enumeration_task(task_title: str) -> bool:
@@ -1184,6 +1272,179 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             )
             self._logger.exception(
                 "windows enumeration task crashed",
+                extra={"grpc_method": "StartTask"},
+            )
+
+    def _run_browser_open_task(self, task: TaskRecord) -> None:
+        task_id = task.task_id
+        requested_url = self._extract_url(task.title)
+        started_at = self._now()
+        step_id = f"{task_id}-step-1"
+        step_title = "Open URL in read-only browser context"
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=step_id,
+                task_id=task_id,
+                sequence_number=1,
+                title=step_title,
+                status="running",
+                detail="Calling read-only browser open-url action.",
+                created_at=started_at,
+                updated_at=started_at,
+            )
+        )
+        self._publish_task_event(
+            task_id=task_id,
+            step_id=step_id,
+            event_type=pb2.TASK_EVENT_TYPE_STEP_STARTED,
+            task_status=pb2.TASK_STATUS_RUNNING,
+            title=step_title,
+            detail="Opening URL with browser operator...",
+        )
+        self._logger.info(
+            "starting browser open-url task",
+            extra={"grpc_method": "StartTask"},
+        )
+
+        if requested_url is None:
+            failed_at = self._now()
+            reason = "No valid URL found in task title."
+            self._memory.upsert_task_step(
+                TaskStepRecord(
+                    step_id=step_id,
+                    task_id=task_id,
+                    sequence_number=1,
+                    title=step_title,
+                    status="failed",
+                    detail=reason,
+                    created_at=started_at,
+                    updated_at=failed_at,
+                )
+            )
+            self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_FAILED,
+                    approval_status=pb2.APPROVAL_STATUS_PENDING,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=failed_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                step_id=step_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                task_status=pb2.TASK_STATUS_FAILED,
+                title=task.title,
+                detail=reason,
+            )
+            return
+
+        try:
+            result = self._browser_operator.open_url(url=requested_url)
+            finished_at = self._now()
+            if not result.is_success or result.snapshot is None:
+                self._memory.upsert_task_step(
+                    TaskStepRecord(
+                        step_id=step_id,
+                        task_id=task_id,
+                        sequence_number=1,
+                        title=step_title,
+                        status="failed",
+                        detail=result.detail,
+                        created_at=started_at,
+                        updated_at=finished_at,
+                    )
+                )
+                self._memory.upsert_task(
+                    TaskRecord(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        task_status=pb2.TASK_STATUS_FAILED,
+                        approval_status=pb2.APPROVAL_STATUS_PENDING,
+                        title=task.title,
+                        created_at=task.created_at,
+                        updated_at=finished_at,
+                    )
+                )
+                self._publish_task_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                    task_status=pb2.TASK_STATUS_FAILED,
+                    title=task.title,
+                    detail=f"Browser action failed: {result.detail}",
+                )
+                return
+
+            detail = (
+                f"Opened: {result.snapshot.url}\n"
+                f"Page title: {result.snapshot.title}\n"
+                f"Summary: {result.snapshot.summary}"
+            )
+            self._memory.upsert_task_step(
+                TaskStepRecord(
+                    step_id=step_id,
+                    task_id=task_id,
+                    sequence_number=1,
+                    title=step_title,
+                    status="completed",
+                    detail=detail,
+                    created_at=started_at,
+                    updated_at=finished_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                step_id=step_id,
+                event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
+                task_status=pb2.TASK_STATUS_RUNNING,
+                title=step_title,
+                detail=detail,
+            )
+
+            completed_task = self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_COMPLETED,
+                    approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=finished_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FINISHED,
+                task_status=completed_task.task_status,
+                title=completed_task.title,
+                detail="Read-only browser open-url task finished.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            failed_at = self._now()
+            self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_FAILED,
+                    approval_status=pb2.APPROVAL_STATUS_PENDING,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=failed_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                task_status=pb2.TASK_STATUS_FAILED,
+                title=task.title,
+                detail=f"Task failed: {exc}",
+            )
+            self._logger.exception(
+                "browser open-url task crashed",
                 extra={"grpc_method": "StartTask"},
             )
 
