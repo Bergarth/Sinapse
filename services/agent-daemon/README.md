@@ -53,5 +53,5 @@ Expected output is placeholder startup logging and service names.
 - Implement planning behavior in `PlannerService.plan`.
 - Implement execution flow in `ExecutorService.execute`.
 - Add persistence/retrieval in `MemoryService`.
-- Add workspace lifecycle operations in `WorkspaceService`.
+- Add workspace attachment, mode enforcement, and file lifecycle operations in `WorkspaceService`.
 - Expand `health_check` for liveness/readiness/dependency checks.
