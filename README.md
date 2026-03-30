@@ -4,13 +4,13 @@ Minimal monorepo scaffold for future implementation.
 
 ## Repository layout
 
-- `apps/desktop-shell`: Desktop application shell host (UI container and app bootstrapping later).
-- `services/agent-daemon`: Background daemon service for agent lifecycle and orchestration.
-- `packages/contracts`: Shared contracts/types/interfaces between apps and services.
-- `packages/memory-store`: Shared package for memory persistence abstractions and adapters.
-- `tests`: Cross-package and integration test suites.
-- `docs`: Project documentation and architecture notes.
+- `apps/desktop-shell`: Will host the desktop application shell, including the UI container and application bootstrapping in future layers.
+- `services/agent-daemon`: Will run as the background daemon responsible for agent lifecycle management and orchestration.
+- `packages/contracts`: Will define shared contracts, types, and interfaces used between apps and services.
+- `packages/memory-store`: Will provide shared memory persistence abstractions and storage adapters.
+- `tests`: Will contain cross-package and integration test suites as implementation is added.
+- `docs`: Contains project documentation and architecture notes.
 
 ## Status
 
-Business logic is intentionally not implemented yet; this scaffold defines structure only.
+This repository is still scaffold-only. No business logic has been implemented yet.
