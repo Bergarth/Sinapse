@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +94,19 @@ class ApprovalRecord:
     decided_by: str = ""
     note: str = ""
     decided_at: str = ""
+
+
+@dataclass(frozen=True)
+class ArtifactRecord:
+    artifact_id: str
+    task_id: str
+    name: str
+    mime_type: str
+    size_bytes: int
+    checksum_sha256: str
+    storage_path: str
+    labels: dict[str, str]
+    created_at: str
 
 
 class MemoryService:
@@ -618,3 +632,133 @@ class MemoryService:
             connection.commit()
 
         return approval
+
+    def list_pending_approvals(self) -> list[ApprovalRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    approval_id,
+                    task_id,
+                    step_id,
+                    risk_class,
+                    action_title,
+                    action_target,
+                    reason,
+                    status,
+                    requested_by,
+                    decided_by,
+                    note,
+                    requested_at,
+                    decided_at
+                FROM approvals
+                WHERE status = 'pending'
+                ORDER BY requested_at ASC
+                """
+            ).fetchall()
+
+        return [
+            ApprovalRecord(
+                approval_id=str(row["approval_id"]),
+                task_id=str(row["task_id"]),
+                step_id=str(row["step_id"]),
+                risk_class=str(row["risk_class"]),
+                action_title=str(row["action_title"]),
+                action_target=str(row["action_target"]),
+                reason=str(row["reason"]),
+                status=str(row["status"]),
+                requested_by=str(row["requested_by"]),
+                decided_by=str(row["decided_by"] or ""),
+                note=str(row["note"] or ""),
+                requested_at=str(row["requested_at"]),
+                decided_at=str(row["decided_at"] or ""),
+            )
+            for row in rows
+        ]
+
+    def upsert_artifact(self, artifact: ArtifactRecord) -> ArtifactRecord:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO artifacts (
+                    artifact_id,
+                    task_id,
+                    name,
+                    mime_type,
+                    size_bytes,
+                    checksum_sha256,
+                    storage_path,
+                    labels_json,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_id)
+                DO UPDATE SET
+                  name = excluded.name,
+                  mime_type = excluded.mime_type,
+                  size_bytes = excluded.size_bytes,
+                  checksum_sha256 = excluded.checksum_sha256,
+                  storage_path = excluded.storage_path,
+                  labels_json = excluded.labels_json
+                """,
+                (
+                    artifact.artifact_id,
+                    artifact.task_id,
+                    artifact.name,
+                    artifact.mime_type,
+                    artifact.size_bytes,
+                    artifact.checksum_sha256,
+                    artifact.storage_path,
+                    json.dumps(artifact.labels),
+                    artifact.created_at,
+                ),
+            )
+            connection.commit()
+
+        return artifact
+
+    def list_artifacts(self, task_id: str) -> list[ArtifactRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    artifact_id,
+                    task_id,
+                    name,
+                    mime_type,
+                    size_bytes,
+                    checksum_sha256,
+                    storage_path,
+                    labels_json,
+                    created_at
+                FROM artifacts
+                WHERE task_id = ?
+                ORDER BY created_at DESC, artifact_id ASC
+                """,
+                (task_id,),
+            ).fetchall()
+
+        artifacts: list[ArtifactRecord] = []
+        for row in rows:
+            labels_raw = str(row["labels_json"] or "{}")
+            try:
+                labels = json.loads(labels_raw)
+            except json.JSONDecodeError:
+                labels = {}
+            if not isinstance(labels, dict):
+                labels = {}
+
+            artifacts.append(
+                ArtifactRecord(
+                    artifact_id=str(row["artifact_id"]),
+                    task_id=str(row["task_id"]),
+                    name=str(row["name"]),
+                    mime_type=str(row["mime_type"]),
+                    size_bytes=int(row["size_bytes"]),
+                    checksum_sha256=str(row["checksum_sha256"]),
+                    storage_path=str(row["storage_path"]),
+                    labels={str(key): str(value) for key, value in labels.items()},
+                    created_at=str(row["created_at"]),
+                )
+            )
+        return artifacts
