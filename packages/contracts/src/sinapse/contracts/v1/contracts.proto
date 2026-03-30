@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+package sinapse.contracts.v1;
+
+option java_multiple_files = true;
+option java_package = "com.sinapse.contracts.v1";
+option csharp_namespace = "Sinapse.Contracts.V1";
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_PENDING = 1;
+  TASK_STATUS_RUNNING = 2;
+  TASK_STATUS_WAITING_FOR_APPROVAL = 3;
+  TASK_STATUS_COMPLETED = 4;
+  TASK_STATUS_FAILED = 5;
+  TASK_STATUS_CANCELED = 6;
+}
+
+enum ApprovalStatus {
+  APPROVAL_STATUS_UNSPECIFIED = 0;
+  APPROVAL_STATUS_REQUIRED = 1;
+  APPROVAL_STATUS_PENDING = 2;
+  APPROVAL_STATUS_APPROVED = 3;
+  APPROVAL_STATUS_REJECTED = 4;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY = 1;
+  HEALTH_STATUS_DEGRADED = 2;
+  HEALTH_STATUS_UNHEALTHY = 3;
+}
+
+message ArtifactMetadata {
+  string artifact_id = 1;
+  string task_id = 2;
+  string name = 3;
+  string mime_type = 4;
+  uint64 size_bytes = 5;
+  string checksum_sha256 = 6;
+  string created_at = 7;
+  map<string, string> labels = 8;
+}
+
+message WorkspaceDto {
+  string workspace_id = 1;
+  string root_path = 2;
+  string active_task_id = 3;
+  string created_at = 4;
+  string updated_at = 5;
+}
+
+message ServiceHealthDto {
+  string service_name = 1;
+  HealthStatus status = 2;
+  string observed_at = 3;
+  string detail = 4;
+}
+
+message TaskSummaryDto {
+  string task_id = 1;
+  string conversation_id = 2;
+  TaskStatus task_status = 3;
+  ApprovalStatus approval_status = 4;
+  string title = 5;
+  string created_at = 6;
+  string updated_at = 7;
+}
+
+message HealthCheckRequest {
+  string requester = 1;
+}
+
+message HealthCheckResponse {
+  ServiceHealthDto daemon = 1;
+  ServiceHealthDto shell = 2;
+}
+
+message StartConversationRequest {
+  string workspace_id = 1;
+  string title = 2;
+  string initiated_by = 3;
+}
+
+message StartConversationResponse {
+  string conversation_id = 1;
+  string started_at = 2;
+}
+
+message SendUserMessageRequest {
+  string conversation_id = 1;
+  string user_message_id = 2;
+  string content = 3;
+  string sent_at = 4;
+}
+
+message SendUserMessageResponse {
+  string daemon_message_id = 1;
+  string accepted_at = 2;
+}
+
+message StartTaskRequest {
+  string conversation_id = 1;
+  string title = 2;
+  string requested_by = 3;
+}
+
+message StartTaskResponse {
+  TaskSummaryDto task = 1;
+}
+
+message ApproveStepRequest {
+  string task_id = 1;
+  string step_id = 2;
+  string approved_by = 3;
+  string note = 4;
+  string approved_at = 5;
+}
+
+message ApproveStepResponse {
+  string task_id = 1;
+  string step_id = 2;
+  ApprovalStatus approval_status = 3;
+}
+
+message CancelTaskRequest {
+  string task_id = 1;
+  string reason = 2;
+  string canceled_by = 3;
+  string canceled_at = 4;
+}
+
+message CancelTaskResponse {
+  TaskSummaryDto task = 1;
+}
+
+message ResumeTaskRequest {
+  string task_id = 1;
+  string resumed_by = 2;
+  string resumed_at = 3;
+}
+
+message ResumeTaskResponse {
+  TaskSummaryDto task = 1;
+}
+
+message ListArtifactsRequest {
+  string task_id = 1;
+  string conversation_id = 2;
+}
+
+message ListArtifactsResponse {
+  repeated ArtifactMetadata artifacts = 1;
+}
+
+message ObserveSystemStateRequest {
+  string workspace_id = 1;
+  string since = 2;
+}
+
+message SystemStateEvent {
+  string event_id = 1;
+  string observed_at = 2;
+  WorkspaceDto workspace = 3;
+  repeated TaskSummaryDto tasks = 4;
+  repeated ServiceHealthDto services = 5;
+}
+
+service DaemonContract {
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc StartConversation(StartConversationRequest) returns (StartConversationResponse);
+  rpc SendUserMessage(SendUserMessageRequest) returns (SendUserMessageResponse);
+  rpc StartTask(StartTaskRequest) returns (StartTaskResponse);
+  rpc ApproveStep(ApproveStepRequest) returns (ApproveStepResponse);
+  rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
+  rpc ResumeTask(ResumeTaskRequest) returns (ResumeTaskResponse);
+  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+  rpc ObserveSystemState(ObserveSystemStateRequest) returns (stream SystemStateEvent);
+}
