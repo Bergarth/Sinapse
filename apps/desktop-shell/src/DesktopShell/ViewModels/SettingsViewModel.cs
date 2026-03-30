@@ -34,6 +34,10 @@ public class SettingsViewModel : INotifyPropertyChanged
     private ProviderItemViewModel? _selectedProvider;
     private ApiKeyEntryItemViewModel? _selectedApiKeyEntry;
     private string _statusMessage = "Load settings to start configuring providers.";
+    private bool _isSearchEnabled;
+    private string _searchProviderId = "duckduckgo";
+    private string _searchEndpoint = "https://api.duckduckgo.com/";
+    private string _searchApiKeyPlaceholderRef = string.Empty;
 
     public SettingsViewModel(DaemonConnectionService daemonConnectionService)
     {
@@ -99,6 +103,30 @@ public class SettingsViewModel : INotifyPropertyChanged
     {
         get => _statusMessage;
         private set => SetProperty(ref _statusMessage, value);
+    }
+
+    public bool IsSearchEnabled
+    {
+        get => _isSearchEnabled;
+        set => SetProperty(ref _isSearchEnabled, value);
+    }
+
+    public string SearchProviderId
+    {
+        get => _searchProviderId;
+        set => SetProperty(ref _searchProviderId, value);
+    }
+
+    public string SearchEndpoint
+    {
+        get => _searchEndpoint;
+        set => SetProperty(ref _searchEndpoint, value);
+    }
+
+    public string SearchApiKeyPlaceholderRef
+    {
+        get => _searchApiKeyPlaceholderRef;
+        set => SetProperty(ref _searchApiKeyPlaceholderRef, value);
     }
 
     public async Task LoadAsync(CancellationToken cancellationToken = default)
@@ -212,6 +240,13 @@ public class SettingsViewModel : INotifyPropertyChanged
         {
             ModelMode = SelectedModelMode,
             ProviderPreference = SelectedProviderPreference,
+            SearchSettings = new SearchSettingsDto
+            {
+                Enabled = IsSearchEnabled,
+                ProviderId = SearchProviderId.Trim(),
+                Endpoint = SearchEndpoint.Trim(),
+                ApiKeyPlaceholderRef = SearchApiKeyPlaceholderRef.Trim(),
+            },
         };
 
         dto.Providers.AddRange(Providers.Select(provider => new ProviderConfigDto
@@ -244,6 +279,14 @@ public class SettingsViewModel : INotifyPropertyChanged
     {
         SelectedModelMode = settings.ModelMode;
         SelectedProviderPreference = settings.ProviderPreference;
+        IsSearchEnabled = settings.SearchSettings?.Enabled ?? false;
+        SearchProviderId = string.IsNullOrWhiteSpace(settings.SearchSettings?.ProviderId)
+            ? "duckduckgo"
+            : settings.SearchSettings.ProviderId;
+        SearchEndpoint = string.IsNullOrWhiteSpace(settings.SearchSettings?.Endpoint)
+            ? "https://api.duckduckgo.com/"
+            : settings.SearchSettings.Endpoint;
+        SearchApiKeyPlaceholderRef = settings.SearchSettings?.ApiKeyPlaceholderRef ?? string.Empty;
 
         Providers.Clear();
         foreach (var provider in settings.Providers)

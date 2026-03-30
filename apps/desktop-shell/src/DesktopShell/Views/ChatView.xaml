@@ -24,6 +24,18 @@
                                         <TextBlock FontWeight="SemiBold" Text="{x:Bind SenderName, Mode=OneWay}" />
                                         <TextBlock Text="{x:Bind Content, Mode=OneWay}" TextWrapping="Wrap" />
                                         <TextBlock Opacity="0.75" FontSize="12" Text="{x:Bind HandlerLabel, Mode=OneWay}" />
+                                        <ItemsRepeater ItemsSource="{x:Bind Sources, Mode=OneWay}">
+                                            <ItemsRepeater.ItemTemplate>
+                                                <DataTemplate x:DataType="viewModels:SearchSourceViewModel">
+                                                    <TextBlock FontSize="12" TextWrapping="Wrap">
+                                                        <Run Text="Source: " />
+                                                        <Run Text="{x:Bind Title, Mode=OneWay}" />
+                                                        <Run Text=" — " />
+                                                        <Run Text="{x:Bind Url, Mode=OneWay}" />
+                                                    </TextBlock>
+                                                </DataTemplate>
+                                            </ItemsRepeater.ItemTemplate>
+                                        </ItemsRepeater>
                                         <TextBlock Opacity="0.7" FontSize="12" Text="{x:Bind Timestamp, Mode=OneWay}" />
                                     </StackPanel>
                                 </Border>
