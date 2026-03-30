@@ -23,6 +23,8 @@ class MessageRecord:
     role: int
     content: str
     created_at: str
+    provider_id: str = ""
+    model_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -199,8 +201,8 @@ class MemoryService:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO messages (message_id, conversation_id, role, content, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO messages (message_id, conversation_id, role, content, created_at, provider_id, model_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
@@ -208,6 +210,8 @@ class MemoryService:
                     message.role,
                     message.content,
                     message.created_at,
+                    message.provider_id,
+                    message.model_id,
                 ),
             )
             connection.commit()
@@ -216,7 +220,7 @@ class MemoryService:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT message_id, conversation_id, role, content, created_at
+                SELECT message_id, conversation_id, role, content, created_at, provider_id, model_id
                 FROM messages
                 WHERE conversation_id = ?
                 ORDER BY created_at ASC, rowid ASC
@@ -231,6 +235,8 @@ class MemoryService:
                 role=int(row["role"]),
                 content=str(row["content"]),
                 created_at=str(row["created_at"]),
+                provider_id=str(row["provider_id"] or ""),
+                model_id=str(row["model_id"] or ""),
             )
             for row in rows
         ]

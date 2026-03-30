@@ -30,6 +30,7 @@ from agent_daemon.services.memory import (
     WorkspaceFileRecord,
     WorkspaceRootRecord,
 )
+from agent_daemon.services.model_router import ModelRouter
 
 pb2, pb2_grpc = load_contract_modules()
 
@@ -99,6 +100,10 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         self._memory = memory_service
         self._windows_operator = windows_operator_service
         self._browser_operator = browser_operator_service
+        self._model_router = ModelRouter(
+            ollama_base_url=os.environ.get("AGENT_DAEMON_OLLAMA_URL", "http://127.0.0.1:11434"),
+            default_ollama_model=os.environ.get("AGENT_DAEMON_OLLAMA_MODEL", "llama3.2"),
+        )
         self._event_subscribers: list[queue.Queue] = []
         self._event_subscribers_lock = threading.Lock()
 
@@ -110,8 +115,8 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             "model_mode": "MODEL_MODE_GUIDED",
             "provider_preference": "PROVIDER_PREFERENCE_LOCAL_PREFERRED",
             "providers": [
-                {"provider_id": "local-default", "display_name": "Local Runtime"},
-                {"provider_id": "cloud-default", "display_name": "Cloud Runtime"},
+                {"provider_id": "ollama", "display_name": "Ollama (local)"},
+                {"provider_id": "placeholder", "display_name": "Built-in Placeholder"},
             ],
             "api_key_entries": [],
             "updated_at": observed_at,
@@ -167,13 +172,6 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
     def _now(self) -> str:
         return datetime.now(UTC).isoformat()
 
-    def _create_placeholder_assistant_reply(self, user_content: str) -> str:
-        prompt_summary = user_content.strip() or "your last message"
-        return (
-            "Thanks! I received your message and the daemon chat loop is working. "
-            f"(Echo summary: \"{prompt_summary[:120]}\")"
-        )
-
     @staticmethod
     def _to_conversation_dto(conversation: ConversationRecord):
         return pb2.ConversationDto(
@@ -191,6 +189,8 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             role=message.role,
             content=message.content,
             created_at=message.created_at,
+            provider_id=message.provider_id,
+            model_id=message.model_id,
         )
 
     @staticmethod
@@ -310,11 +310,12 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
     def _capabilities(self):
         windows_operator = self._windows_operator.availability()
         browser_operator = self._browser_operator.availability()
+        ollama_status = next((item for item in self._model_router.get_status() if item.provider_id == "ollama"), None)
         return [
             pb2.CapabilityStatusDto(
                 capability_name="chat",
                 is_available=True,
-                detail="Conversation loop scaffold is available.",
+                detail="Conversation loop with local model routing is available.",
             ),
             pb2.CapabilityStatusDto(
                 capability_name="tasks",
@@ -335,6 +336,11 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 capability_name="browser support",
                 is_available=browser_operator.is_available,
                 detail=browser_operator.detail,
+            ),
+            pb2.CapabilityStatusDto(
+                capability_name="ollama",
+                is_available=ollama_status.is_available if ollama_status else False,
+                detail=ollama_status.detail if ollama_status else "Ollama status is unavailable.",
             ),
         ]
 
@@ -473,12 +479,16 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             created_at=request.sent_at or accepted_at,
         )
 
+        settings_payload = self._load_app_settings_payload()
+        completion = self._model_router.complete(request.content, settings_payload)
         assistant_message = MessageRecord(
             message_id=assistant_message_id,
             conversation_id=conversation.conversation_id,
             role=pb2.MESSAGE_ROLE_ASSISTANT,
-            content=self._create_placeholder_assistant_reply(request.content),
+            content=completion.content,
             created_at=accepted_at,
+            provider_id=completion.provider_id,
+            model_id=completion.model_id,
         )
 
         self._memory.add_message(user_message)
