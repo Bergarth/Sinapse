@@ -19,6 +19,9 @@ Implemented today:
 - SQLite-backed persistence for conversations, messages, tasks, steps, workspace roots/files, app settings, approvals, and artifacts.
 - Real read-only task handlers for browser open-url and Windows window enumeration.
 - Real approval-gated Windows operator task handlers for safe write actions (launch app, focus window, open file, type text).
+- Mixed speaker-workspace intake/summarization across FRD/ZMA, text/markdown/json/csv, zip inventories, and image metadata.
+- First-pass crossover region ranking for FRD/ZMA workflows with transparent warnings and confidence scores.
+- Approval-gated REW workflow task support (launch/attach + import) with explicit `not_yet_supported` export typing.
 - Approval-gate persistence with restart recovery for pending approvals.
 - Local secure API-key storage integration using Windows DPAPI-backed secret references.
 

@@ -41,6 +41,9 @@ from agent_daemon.services.frd_zma_parser import (
     parse_frd_file,
     parse_zma_file,
 )
+from agent_daemon.services.crossover import rank_first_pass_crossover_regions
+from agent_daemon.services.rew_integration import RewIntegrationService
+from agent_daemon.services.workspace_intake import controlled_extract_zip, summarize_workspace
 from agent_daemon.services.search_adapter import SearchResult, create_search_adapter
 from agent_daemon.speech_runtime import LocalSpeechRuntime
 
@@ -160,6 +163,7 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         self._artifacts_root = artifacts_root
         self._artifacts_root.mkdir(parents=True, exist_ok=True)
         self._secret_store = secret_store
+        self._rew_integration = RewIntegrationService(windows_operator_service)
         self._restore_pending_approvals()
 
     _APP_SETTINGS_KEY = "model_provider_settings_v1"
@@ -810,6 +814,8 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             completion = self._build_browser_open_completion(request.content)
         elif self._is_workspace_file_analysis_request(request.content):
             completion = self._build_workspace_file_analysis_completion(conversation.conversation_id)
+        elif self._is_workspace_summary_request(request.content):
+            completion = self._build_workspace_summary_completion(conversation.conversation_id)
         else:
             search_result = self._try_run_search(request.content, settings_payload)
             if search_result is None:
@@ -983,9 +989,16 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
     @staticmethod
     def _is_workspace_file_analysis_request(content: str) -> bool:
         normalized = content.strip().lower()
-        if "analy" not in normalized:
+        if not any(token in normalized for token in ("analy", "suggest", "crossover")):
             return False
         return any(marker in normalized for marker in ("frd", "zma"))
+
+    @staticmethod
+    def _is_workspace_summary_request(content: str) -> bool:
+        normalized = content.strip().lower()
+        if "workspace" in normalized or "folder" in normalized:
+            return any(marker in normalized for marker in ("summarize", "summary", "what is in", "inventory"))
+        return False
 
     def _build_workspace_file_analysis_completion(self, conversation_id: str) -> ChatCompletion:
         summaries: list[ParsedTableSummary] = []
@@ -1021,6 +1034,56 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             content=self._format_file_analysis_summary(summaries, read_failures),
             provider_id="workspace-analyzer",
             model_id="frd-zma-parser-v1",
+        )
+
+    def _build_workspace_summary_completion(self, conversation_id: str) -> ChatCompletion:
+        roots = self._memory.list_workspace_roots(conversation_id)
+        if not roots:
+            return ChatCompletion(
+                content=(
+                    "I don’t see any attached workspace roots yet. "
+                    "Attach your speaker-design folder first, then ask for a summary again."
+                ),
+                provider_id="workspace-summary",
+                model_id="workspace-intake-v1",
+            )
+
+        lines: list[str] = ["Here is a mixed-file summary of your attached workspace:"]
+        for root in roots:
+            files = self._memory.list_workspace_files(root.root_id, limit=5000)
+            relative_paths = [item.relative_path for item in files]
+            summary = summarize_workspace(Path(root.root_path), relative_paths)
+            lines.append("")
+            lines.append(f"Root: {root.display_name} ({root.root_path})")
+            lines.append(
+                f"Files indexed: {summary.total_files} | supported: {summary.supported_files} | unsupported: {summary.unsupported_files}"
+            )
+            if summary.counts_by_type:
+                counts = ", ".join(f"{key}: {value}" for key, value in sorted(summary.counts_by_type.items()))
+                lines.append(f"Type counts: {counts}")
+            if summary.sample_supported:
+                lines.append("Sample supported files:")
+                for item in summary.sample_supported[:8]:
+                    lines.append(f"  • {item}")
+            if summary.sample_unsupported:
+                lines.append("Unsupported files:")
+                for item in summary.sample_unsupported[:6]:
+                    lines.append(f"  ⚠ {item}")
+            for zip_inventory in summary.zip_inventories[:3]:
+                lines.append(f"Zip inventory: {zip_inventory.file_path}")
+                for entry in zip_inventory.entries[:8]:
+                    lines.append(f"  - {entry}")
+                for warning in zip_inventory.warnings:
+                    lines.append(f"  ⚠ {warning}")
+            for warning in summary.warnings[:8]:
+                lines.append(f"⚠ {warning}")
+
+        lines.append("")
+        lines.append("Tip: try “Analyze these FRD and ZMA files” or “Suggest a crossover region”.")
+        return ChatCompletion(
+            content="\n".join(lines),
+            provider_id="workspace-summary",
+            model_id="workspace-intake-v1",
         )
 
     def _format_file_analysis_summary(self, summaries: list[ParsedTableSummary], read_failures: list[str]) -> str:
@@ -1073,7 +1136,21 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 lines.append(f"  • {len(read_failures) - 10} more read errors not shown.")
             lines.append("")
 
-        lines.append("Note: this first pass focuses on parsing and validation, not ranking/crossover decisions yet.")
+        frd = [item for item in summaries if item.file_type.upper() == "FRD"]
+        zma = [item for item in summaries if item.file_type.upper() == "ZMA"]
+        ranked = rank_first_pass_crossover_regions(frd_summaries=frd, zma_summaries=zma)
+        lines.append("First-pass crossover region suggestions:")
+        for index, candidate in enumerate(ranked[:3], start=1):
+            if candidate.frequency_hz <= 0:
+                lines.append(f"  {index}. Not enough data ({candidate.confidence} confidence)")
+            else:
+                lines.append(
+                    f"  {index}. ~{candidate.frequency_hz:.1f} Hz | score {candidate.score:.1f} | confidence {candidate.confidence}"
+                )
+            lines.append(f"     Reasoning: {candidate.reasoning}")
+            for warning in candidate.warnings[:2]:
+                lines.append(f"     ⚠ {warning}")
+        lines.append("Note: this is conservative guidance, not a full automatic crossover design.")
         return "\n".join(lines).strip()
 
     def _build_browser_open_completion(self, content: str) -> ChatCompletion:
@@ -1553,6 +1630,18 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         if task is None:
             return
 
+        if self._should_run_rew_workflow_task(task.title):
+            self._run_rew_workflow_task(task, require_approval=require_approval)
+            return
+
+        if self._should_run_frd_zma_analysis_task(task.title):
+            self._run_frd_zma_analysis_task(task)
+            return
+
+        if self._should_run_workspace_summary_task(task.title):
+            self._run_workspace_summary_task(task)
+            return
+
         operator_intent = self._parse_operator_task_intent(task.title)
         if operator_intent is not None:
             self._run_windows_operator_action_task(task, operator_intent=operator_intent, require_approval=require_approval)
@@ -2000,6 +2089,249 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 "window",
                 "open app",
                 "enumerate",
+            )
+        )
+
+    @staticmethod
+    def _should_run_workspace_summary_task(task_title: str) -> bool:
+        normalized = task_title.strip().lower()
+        return ("summar" in normalized or "inventory" in normalized) and (
+            "workspace" in normalized or "folder" in normalized
+        )
+
+    @staticmethod
+    def _should_run_frd_zma_analysis_task(task_title: str) -> bool:
+        normalized = task_title.strip().lower()
+        mentions_measurements = any(token in normalized for token in ("frd", "zma", "crossover"))
+        asks_for_analysis = any(token in normalized for token in ("analy", "crossover", "suggest"))
+        return mentions_measurements and asks_for_analysis
+
+    @staticmethod
+    def _should_run_rew_workflow_task(task_title: str) -> bool:
+        normalized = task_title.strip().lower()
+        return "rew" in normalized or "room eq wizard" in normalized
+
+    def _workspace_files_for_extensions(
+        self,
+        conversation_id: str,
+        allowed_extensions: set[str],
+    ) -> list[Path]:
+        files: list[Path] = []
+        for root in self._memory.list_workspace_roots(conversation_id):
+            root_path = Path(root.root_path)
+            for record in self._memory.list_workspace_files(root.root_id, limit=5000):
+                if Path(record.relative_path).suffix.lower() in allowed_extensions:
+                    files.append((root_path / record.relative_path).resolve())
+        return files
+
+    def _run_workspace_summary_task(self, task: TaskRecord) -> None:
+        completion = self._build_workspace_summary_completion(task.conversation_id)
+        now = self._now()
+        step_id = f"{task.task_id}-workspace-summary"
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=step_id,
+                task_id=task.task_id,
+                sequence_number=1,
+                title="Summarize attached workspace",
+                status="completed",
+                detail=completion.content,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self._persist_artifact(
+            task_id=task.task_id,
+            name="workspace-summary.md",
+            mime_type="text/markdown",
+            payload=completion.content.encode("utf-8"),
+            labels={"kind": "workspace_summary"},
+        )
+        self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                task_status=pb2.TASK_STATUS_COMPLETED,
+                approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=now,
+            )
+        )
+
+    def _run_frd_zma_analysis_task(self, task: TaskRecord) -> None:
+        completion = self._build_workspace_file_analysis_completion(task.conversation_id)
+        now = self._now()
+        step_id = f"{task.task_id}-frd-zma-analysis"
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=step_id,
+                task_id=task.task_id,
+                sequence_number=1,
+                title="Analyze FRD/ZMA files and suggest crossover region",
+                status="completed",
+                detail=completion.content,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self._persist_artifact(
+            task_id=task.task_id,
+            name="frd-zma-analysis.md",
+            mime_type="text/markdown",
+            payload=completion.content.encode("utf-8"),
+            labels={"kind": "analysis"},
+        )
+
+        # Persist machine-readable ranking.
+        summaries: list[ParsedTableSummary] = []
+        for candidate in self._workspace_files_for_extensions(task.conversation_id, {".frd", ".zma"}):
+            try:
+                if candidate.suffix.lower() == ".frd":
+                    summaries.append(parse_frd_file(candidate))
+                else:
+                    summaries.append(parse_zma_file(candidate))
+            except OSError:
+                continue
+        ranking = rank_first_pass_crossover_regions(
+            frd_summaries=[item for item in summaries if item.file_type == "FRD"],
+            zma_summaries=[item for item in summaries if item.file_type == "ZMA"],
+        )
+        payload = {
+            "task_id": task.task_id,
+            "generated_at": now,
+            "candidates": [
+                {
+                    "frequency_hz": item.frequency_hz,
+                    "score": item.score,
+                    "confidence": item.confidence,
+                    "warnings": item.warnings,
+                    "reasoning": item.reasoning,
+                }
+                for item in ranking
+            ],
+        }
+        self._persist_artifact(
+            task_id=task.task_id,
+            name="crossover-recommendations.json",
+            mime_type="application/json",
+            payload=json.dumps(payload, indent=2).encode("utf-8"),
+            labels={"kind": "crossover_recommendation"},
+        )
+        self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                task_status=pb2.TASK_STATUS_COMPLETED,
+                approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=now,
+            )
+        )
+
+    def _run_rew_workflow_task(self, task: TaskRecord, *, require_approval: bool) -> None:
+        task_id = task.task_id
+        if require_approval:
+            approval_step_id = f"{task_id}-approval-rew"
+            approved, note = self._request_step_approval(
+                task=task,
+                step_id=approval_step_id,
+                step_title="Launch or control REW application",
+                action_target="Room EQ Wizard (REW)",
+                requested_by="daemon",
+            )
+            if not approved:
+                self._memory.upsert_task(
+                    TaskRecord(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        task_status=pb2.TASK_STATUS_CANCELED,
+                        approval_status=pb2.APPROVAL_STATUS_REJECTED,
+                        title=task.title,
+                        created_at=task.created_at,
+                        updated_at=self._now(),
+                    )
+                )
+                return
+            _ = note
+
+        start = self._now()
+        launch_result = self._rew_integration.attach_or_launch()
+        measurement_paths = self._workspace_files_for_extensions(task.conversation_id, {".frd", ".zma", ".zip"})
+
+        import_targets: list[Path] = []
+        zip_extract_warnings: list[str] = []
+        controlled_root = (self._artifacts_root / task.task_id / "rew-import-staging").resolve()
+        for candidate in measurement_paths:
+            if candidate.suffix.lower() == ".zip":
+                extracted, warnings = controlled_extract_zip(
+                    candidate,
+                    destination_root=controlled_root,
+                    allowed_extensions={".frd", ".zma"},
+                    max_files=30,
+                )
+                import_targets.extend(extracted)
+                zip_extract_warnings.extend(warnings)
+            else:
+                import_targets.append(candidate)
+
+        import_result = self._rew_integration.import_measurement_files(import_targets)
+        export_result = self._rew_integration.export_artifacts_not_yet_supported()
+        result_payload = {
+            "task_id": task_id,
+            "started_at": start,
+            "attach_or_launch": launch_result.__dict__,
+            "import_measurements": import_result.__dict__,
+            "export_artifacts": export_result.__dict__,
+            "zip_warnings": zip_extract_warnings,
+        }
+        detail = (
+            f"REW status: {launch_result.status}. "
+            f"{import_result.detail} "
+            f"Export: {export_result.status}."
+        )
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=f"{task_id}-rew-flow",
+                task_id=task_id,
+                sequence_number=1,
+                title="REW launch/attach and import flow",
+                status="completed" if launch_result.status in {"attached", "launched"} else "failed",
+                detail=detail,
+                created_at=start,
+                updated_at=self._now(),
+            )
+        )
+        self._persist_artifact(
+            task_id=task_id,
+            name="rew-workflow-result.json",
+            mime_type="application/json",
+            payload=json.dumps(result_payload, indent=2).encode("utf-8"),
+            labels={"kind": "rew_workflow"},
+        )
+        self._persist_artifact(
+            task_id=task_id,
+            name="rew-workflow-summary.md",
+            mime_type="text/markdown",
+            payload=(
+                "# REW Workflow Result\n\n"
+                f"- Attach/launch: **{launch_result.status}** ({launch_result.detail})\n"
+                f"- Import: **{import_result.status}** ({import_result.detail})\n"
+                f"- Export: **{export_result.status}** ({export_result.detail})\n"
+            ).encode("utf-8"),
+            labels={"kind": "rew_summary"},
+        )
+        final_status = pb2.TASK_STATUS_COMPLETED if launch_result.status in {"attached", "launched"} else pb2.TASK_STATUS_FAILED
+        self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                task_status=final_status,
+                approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=self._now(),
             )
         )
 

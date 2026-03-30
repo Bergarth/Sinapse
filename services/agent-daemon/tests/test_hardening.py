@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from pathlib import Path
 
 import grpc
@@ -20,6 +21,9 @@ from agent_daemon.services.secret_store import SecretStore
 
 
 class _DummyWindowsOperator:
+    def __init__(self) -> None:
+        self.opened_files: list[str] = []
+
     def availability(self):
         return type("Availability", (), {"is_available": True, "detail": "ok"})()
 
@@ -38,6 +42,7 @@ class _DummyWindowsOperator:
         return type("Result", (), {"is_success": True, "detail": f"Focused {window_ref}", "payload": {"window": window_ref}})()
 
     def open_file(self, *, file_path: str):
+        self.opened_files.append(file_path)
         return type("Result", (), {"is_success": True, "detail": f"Opened {file_path}", "payload": {"file": file_path}})()
 
     def type_text(self, *, target: str, text: str):
@@ -72,9 +77,10 @@ class HardeningTests(unittest.TestCase):
         root = Path(self._temp_dir.name)
         migrations = Path(__file__).resolve().parents[3] / "packages" / "memory-store" / "migrations"
         self.memory = MemoryService(str(root / "memory.db"), migrations)
+        self.windows = _DummyWindowsOperator()
         self.service = DaemonContractService(
             memory_service=self.memory,
-            windows_operator_service=_DummyWindowsOperator(),
+            windows_operator_service=self.windows,
             browser_operator_service=_DummyBrowserOperator(),
             artifacts_root=root / "artifacts",
             secret_store=SecretStore(root / "secrets.json"),
@@ -233,6 +239,123 @@ class HardeningTests(unittest.TestCase):
         names = {item.name for item in artifacts.artifacts}
         self.assertIn("launch_application-summary.txt", names)
         self.assertIn("launch_application-result.json", names)
+
+    def test_workspace_summary_handles_mixed_types_and_zip_inventory(self) -> None:
+        conv = self.memory.upsert_conversation(
+            ConversationRecord("conv-workspace", "Workspace", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        )
+        root_dir = Path(self._temp_dir.name) / "speaker-folder"
+        root_dir.mkdir(parents=True, exist_ok=True)
+        (root_dir / "README.md").write_text("# Project", encoding="utf-8")
+        (root_dir / "notes.txt").write_text("todo", encoding="utf-8")
+        (root_dir / "data.csv").write_text("f,db\n100,82", encoding="utf-8")
+        (root_dir / "config.json").write_text("{bad json", encoding="utf-8")
+        (root_dir / "diagram.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (root_dir / "unknown.bin").write_bytes(b"abc")
+        with zipfile.ZipFile(root_dir / "bundle.zip", "w") as archive:
+            archive.writestr("inside/woofer.frd", "100 82")
+
+        self.service.AttachWorkspaceRoot(
+            pb2.AttachWorkspaceRootRequest(
+                conversation_id=conv.conversation_id,
+                root_path=str(root_dir),
+                display_name="Speaker folder",
+                access_mode=pb2.WORKSPACE_ACCESS_MODE_READ_ONLY,
+            ),
+            _FakeContext(),
+        )
+
+        completion = self.service._build_workspace_summary_completion(conv.conversation_id)  # noqa: SLF001
+        self.assertIn("mixed-file summary", completion.content)
+        self.assertIn("unsupported", completion.content.lower())
+        self.assertIn("Zip inventory", completion.content)
+
+    def test_rew_workflow_task_imports_workspace_measurements_and_persists_artifacts(self) -> None:
+        conv = self.memory.upsert_conversation(
+            ConversationRecord("conv-rew", "REW", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        )
+        root_dir = Path(self._temp_dir.name) / "rew-folder"
+        root_dir.mkdir(parents=True, exist_ok=True)
+        (root_dir / "woofer.frd").write_text("100 82\n200 84", encoding="utf-8")
+        (root_dir / "woofer.zma").write_text("100 6.4 12\n200 7.1 9", encoding="utf-8")
+        with zipfile.ZipFile(root_dir / "extra.zip", "w") as archive:
+            archive.writestr("inside/tweeter.frd", "1000 90\n2000 88")
+
+        self.service.AttachWorkspaceRoot(
+            pb2.AttachWorkspaceRootRequest(
+                conversation_id=conv.conversation_id,
+                root_path=str(root_dir),
+                display_name="REW folder",
+                access_mode=pb2.WORKSPACE_ACCESS_MODE_READ_ONLY,
+            ),
+            _FakeContext(),
+        )
+        task = self.memory.upsert_task(
+            TaskRecord(
+                task_id="task-rew",
+                conversation_id=conv.conversation_id,
+                task_status=pb2.TASK_STATUS_RUNNING,
+                approval_status=pb2.APPROVAL_STATUS_PENDING,
+                title="Open REW and import these files",
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:00:00Z",
+            )
+        )
+        worker = threading.Thread(target=self.service._run_task, args=(task.task_id, True), daemon=True)  # noqa: SLF001
+        worker.start()
+
+        pending = []
+        for _ in range(20):
+            pending = self.memory.list_pending_approvals()
+            if pending:
+                break
+            time.sleep(0.01)
+        self.assertTrue(pending)
+        self.service.ApproveStep(
+            pb2.ApproveStepRequest(task_id=task.task_id, step_id=pending[0].step_id, approved_by="tests", note="yes"),
+            _FakeContext(),
+        )
+        worker.join(timeout=2)
+        artifacts = self.service.ListArtifacts(pb2.ListArtifactsRequest(task_id=task.task_id), _FakeContext())
+        names = {item.name for item in artifacts.artifacts}
+        self.assertIn("rew-workflow-result.json", names)
+        self.assertIn("rew-workflow-summary.md", names)
+        self.assertGreaterEqual(len(self.windows.opened_files), 2)
+
+    def test_frd_zma_analysis_task_persists_crossover_recommendations(self) -> None:
+        conv = self.memory.upsert_conversation(
+            ConversationRecord("conv-xo", "XO", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        )
+        root_dir = Path(self._temp_dir.name) / "xo-folder"
+        root_dir.mkdir(parents=True, exist_ok=True)
+        (root_dir / "driver.frd").write_text("100 82\n500 87\n1000 86\n2000 83", encoding="utf-8")
+        (root_dir / "driver.zma").write_text("80 5.8 10\n500 7.1 20\n1500 8.5 30\n2500 10.1 32", encoding="utf-8")
+        self.service.AttachWorkspaceRoot(
+            pb2.AttachWorkspaceRootRequest(
+                conversation_id=conv.conversation_id,
+                root_path=str(root_dir),
+                display_name="XO folder",
+                access_mode=pb2.WORKSPACE_ACCESS_MODE_READ_ONLY,
+            ),
+            _FakeContext(),
+        )
+
+        task = self.memory.upsert_task(
+            TaskRecord(
+                task_id="task-xo",
+                conversation_id=conv.conversation_id,
+                task_status=pb2.TASK_STATUS_RUNNING,
+                approval_status=pb2.APPROVAL_STATUS_PENDING,
+                title="Suggest a crossover region",
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:00:00Z",
+            )
+        )
+        self.service._run_task(task.task_id, False)  # noqa: SLF001
+        artifacts = self.service.ListArtifacts(pb2.ListArtifactsRequest(task_id=task.task_id), _FakeContext())
+        names = {item.name for item in artifacts.artifacts}
+        self.assertIn("frd-zma-analysis.md", names)
+        self.assertIn("crossover-recommendations.json", names)
 
 
 if __name__ == "__main__":

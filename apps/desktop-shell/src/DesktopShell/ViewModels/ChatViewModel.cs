@@ -106,6 +106,14 @@ public class ChatViewModel : INotifyPropertyChanged
 
     public string AddFolderButtonLabel { get; } = "Add folder";
 
+    public string QuickActionExamplesTitle { get; } = "Try these starter actions";
+
+    public string QuickActionExamplesText { get; } =
+        "• Analyze these FRD and ZMA files\n" +
+        "• Open REW and import these files\n" +
+        "• Suggest a crossover region\n" +
+        "• Summarize this speaker-design folder";
+
     public ObservableCollection<ChatMessageViewModel> Messages { get; } = [];
 
     public bool IsSending
