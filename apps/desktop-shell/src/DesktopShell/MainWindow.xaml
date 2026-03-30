@@ -9,32 +9,50 @@
     Title="DesktopShell">
 
     <Grid>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="260" />
-            <ColumnDefinition Width="*" />
-            <ColumnDefinition Width="360" />
-        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
 
-        <views:SidebarView Grid.Column="0" />
+        <Border Grid.Row="0" Margin="12,12,12,0" Padding="12" BorderBrush="Gray" BorderThickness="1" CornerRadius="8">
+            <StackPanel Spacing="6">
+                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Daemon connection" />
+                <TextBlock Text="This startup check confirms whether the shell can reach the daemon." TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.ConnectionIndicatorEmoji, Mode=OneWay}" FontSize="18" />
+                <TextBlock Text="{x:Bind ViewModel.ConnectionStatus, Mode=OneWay}" FontSize="16" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind ViewModel.ConnectionDetail, Mode=OneWay}" TextWrapping="Wrap" />
+                <Button Content="Retry connection check" Click="RetryConnectionCheck_Click" HorizontalAlignment="Left" />
+            </StackPanel>
+        </Border>
 
-        <Grid Grid.Column="1">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="*" />
-                <RowDefinition Height="220" />
-            </Grid.RowDefinitions>
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="260" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="360" />
+            </Grid.ColumnDefinitions>
 
-            <views:ChatView Grid.Row="0" />
-            <views:TaskTimelineView Grid.Row="1" />
-        </Grid>
+            <views:SidebarView Grid.Column="0" />
 
-        <Grid Grid.Column="2">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="*" />
-                <RowDefinition Height="*" />
-            </Grid.RowDefinitions>
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="220" />
+                </Grid.RowDefinitions>
 
-            <views:ArtifactPanelView Grid.Row="0" />
-            <views:OnboardingView Grid.Row="1" />
+                <views:ChatView Grid.Row="0" />
+                <views:TaskTimelineView Grid.Row="1" />
+            </Grid>
+
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <views:ArtifactPanelView Grid.Row="0" />
+                <views:OnboardingView Grid.Row="1" />
+            </Grid>
         </Grid>
     </Grid>
 </Window>
