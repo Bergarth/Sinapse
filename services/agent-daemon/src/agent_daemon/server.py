@@ -107,6 +107,7 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         )
         self._event_subscribers: list[queue.Queue] = []
         self._event_subscribers_lock = threading.Lock()
+        self._logger = logging.getLogger("agent_daemon")
 
     _APP_SETTINGS_KEY = "model_provider_settings_v1"
 
@@ -517,11 +518,15 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         )
 
         settings_payload = self._load_app_settings_payload()
-        search_result = self._try_run_search(request.content, settings_payload)
-        if search_result is None:
-            completion = self._model_router.complete(request.content, settings_payload)
+        search_result = None
+        if self._is_list_windows_request(request.content):
+            completion = self._build_windows_list_completion()
         else:
-            completion = self._build_search_completion(search_result)
+            search_result = self._try_run_search(request.content, settings_payload)
+            if search_result is None:
+                completion = self._model_router.complete(request.content, settings_payload)
+            else:
+                completion = self._build_search_completion(search_result)
         assistant_message = MessageRecord(
             message_id=assistant_message_id,
             conversation_id=conversation.conversation_id,
@@ -575,6 +580,69 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
 
         search_markers = ("look up ", "find on web ", "web search ", "search for ")
         return any(marker in normalized for marker in search_markers)
+
+    @staticmethod
+    def _is_list_windows_request(content: str) -> bool:
+        normalized = content.strip().lower()
+        markers = (
+            "what apps/windows do i currently have open",
+            "what windows do i have open",
+            "what apps do i have open",
+            "list open windows",
+            "show open windows",
+            "open windows",
+        )
+        return any(marker in normalized for marker in markers)
+
+    def _build_windows_list_completion(self) -> ChatCompletion:
+        self._logger.info(
+            "running read-only windows enumeration from chat request",
+            extra={"grpc_method": "SendUserMessage"},
+        )
+        try:
+            result = self._windows_operator.enumerate_open_windows()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.exception(
+                "windows enumeration failed",
+                extra={"grpc_method": "SendUserMessage"},
+            )
+            return ChatCompletion(
+                content=(
+                    "I tried to list your open windows, but the desktop operator hit an unexpected error. "
+                    f"Details: {exc}"
+                ),
+                provider_id="windows-operator",
+                model_id="windows-readonly-v1",
+            )
+
+        if not result.is_success:
+            return ChatCompletion(
+                content=(
+                    "I couldn't list open windows from the desktop operator.\n"
+                    f"Reason: {result.detail}"
+                ),
+                provider_id="windows-operator",
+                model_id="windows-readonly-v1",
+            )
+
+        windows = result.payload or []
+        if len(windows) == 0:
+            content = "I checked your desktop and did not find any visible top-level windows."
+        else:
+            lines = [
+                "Here are your visible top-level windows (read-only):",
+            ]
+            for index, window in enumerate(windows, start=1):
+                title = str(window.get("title", "")).strip() or "(untitled)"
+                class_name = str(window.get("class_name", "")).strip() or "unknown-class"
+                lines.append(f"{index}. {title} [{class_name}]")
+            content = "\n".join(lines)
+
+        return ChatCompletion(
+            content=content,
+            provider_id="windows-operator",
+            model_id="windows-readonly-v1",
+        )
 
     def _try_run_search(self, content: str, settings_payload: dict) -> SearchResult | None:
         if not self._is_search_request(content):
@@ -864,6 +932,10 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         if task is None:
             return
 
+        if self._should_run_windows_enumeration_task(task.title):
+            self._run_windows_enumeration_task(task)
+            return
+
         fake_steps = [
             "Understanding your request",
             "Preparing a safe placeholder plan",
@@ -956,6 +1028,163 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 task_status=pb2.TASK_STATUS_FAILED,
                 title=task.title,
                 detail=f"Task failed: {exc}",
+            )
+
+    @staticmethod
+    def _should_run_windows_enumeration_task(task_title: str) -> bool:
+        normalized = task_title.strip().lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "window",
+                "open app",
+                "enumerate",
+            )
+        )
+
+    def _run_windows_enumeration_task(self, task: TaskRecord) -> None:
+        task_id = task.task_id
+        started_at = self._now()
+        step_id = f"{task_id}-step-1"
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=step_id,
+                task_id=task_id,
+                sequence_number=1,
+                title="Enumerate visible top-level windows",
+                status="running",
+                detail="Calling read-only Windows operator action.",
+                created_at=started_at,
+                updated_at=started_at,
+            )
+        )
+        self._publish_task_event(
+            task_id=task_id,
+            step_id=step_id,
+            event_type=pb2.TASK_EVENT_TYPE_STEP_STARTED,
+            task_status=pb2.TASK_STATUS_RUNNING,
+            title="Enumerate visible top-level windows",
+            detail="Running read-only desktop query...",
+        )
+        self._logger.info(
+            "starting windows enumeration task",
+            extra={"grpc_method": "StartTask"},
+        )
+
+        try:
+            result = self._windows_operator.enumerate_open_windows()
+            finished_at = self._now()
+            if not result.is_success:
+                self._memory.upsert_task_step(
+                    TaskStepRecord(
+                        step_id=step_id,
+                        task_id=task_id,
+                        sequence_number=1,
+                        title="Enumerate visible top-level windows",
+                        status="failed",
+                        detail=result.detail,
+                        created_at=started_at,
+                        updated_at=finished_at,
+                    )
+                )
+                self._memory.upsert_task(
+                    TaskRecord(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        task_status=pb2.TASK_STATUS_FAILED,
+                        approval_status=pb2.APPROVAL_STATUS_PENDING,
+                        title=task.title,
+                        created_at=task.created_at,
+                        updated_at=finished_at,
+                    )
+                )
+                self._publish_task_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                    task_status=pb2.TASK_STATUS_FAILED,
+                    title=task.title,
+                    detail=f"Desktop query failed: {result.detail}",
+                )
+                return
+
+            windows = result.payload or []
+            if len(windows) == 0:
+                detail = "No visible top-level windows found."
+            else:
+                lines = [f"Found {len(windows)} visible top-level window(s):"]
+                for index, window in enumerate(windows, start=1):
+                    title = str(window.get("title", "")).strip() or "(untitled)"
+                    class_name = str(window.get("class_name", "")).strip() or "unknown-class"
+                    lines.append(f"{index}. {title} [{class_name}]")
+                detail = "\n".join(lines)
+
+            self._memory.upsert_task_step(
+                TaskStepRecord(
+                    step_id=step_id,
+                    task_id=task_id,
+                    sequence_number=1,
+                    title="Enumerate visible top-level windows",
+                    status="completed",
+                    detail=detail,
+                    created_at=started_at,
+                    updated_at=finished_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                step_id=step_id,
+                event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
+                task_status=pb2.TASK_STATUS_RUNNING,
+                title="Enumerate visible top-level windows",
+                detail=detail,
+            )
+
+            completed_task = self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_COMPLETED,
+                    approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=finished_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FINISHED,
+                task_status=completed_task.task_status,
+                title=completed_task.title,
+                detail="Read-only windows operator task finished.",
+            )
+            self._logger.info(
+                "windows enumeration task completed",
+                extra={"grpc_method": "StartTask"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            failed_at = self._now()
+            self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_FAILED,
+                    approval_status=pb2.APPROVAL_STATUS_PENDING,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=failed_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                task_status=pb2.TASK_STATUS_FAILED,
+                title=task.title,
+                detail=f"Task failed: {exc}",
+            )
+            self._logger.exception(
+                "windows enumeration task crashed",
+                extra={"grpc_method": "StartTask"},
             )
 
 
