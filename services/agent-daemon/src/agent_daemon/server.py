@@ -35,6 +35,7 @@ from agent_daemon.services.memory import (
 )
 from agent_daemon.services.model_router import ChatCompletion, ModelRouter
 from agent_daemon.services.search_adapter import SearchResult, create_search_adapter
+from agent_daemon.speech_runtime import LocalSpeechRuntime
 
 pb2, pb2_grpc = load_contract_modules()
 
@@ -133,6 +134,7 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         self._pending_approvals: dict[str, PendingApproval] = {}
         self._pending_approvals_lock = threading.Lock()
         self._logger = logging.getLogger("agent_daemon")
+        self._speech_runtime = LocalSpeechRuntime()
 
     _APP_SETTINGS_KEY = "model_provider_settings_v1"
 
@@ -151,6 +153,11 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 "provider_id": "duckduckgo",
                 "endpoint": "https://api.duckduckgo.com/",
                 "api_key_placeholder_ref": "",
+            },
+            "speech_settings": {
+                "spoken_replies_enabled": False,
+                "stt_provider_id": "local-whisper",
+                "tts_provider_id": "local-pyttsx3",
             },
             "updated_at": observed_at,
         }
@@ -176,6 +183,9 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         search_settings = payload.get("search_settings", {})
         if not isinstance(search_settings, dict):
             search_settings = {}
+        speech_settings = payload.get("speech_settings", {})
+        if not isinstance(speech_settings, dict):
+            speech_settings = {}
         return pb2.AppSettingsDto(
             model_mode=getattr(pb2, payload.get("model_mode", "MODEL_MODE_GUIDED"), pb2.MODEL_MODE_GUIDED),
             provider_preference=getattr(
@@ -208,6 +218,11 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 provider_id=str(search_settings.get("provider_id", "duckduckgo")).strip(),
                 endpoint=str(search_settings.get("endpoint", "https://api.duckduckgo.com/")).strip(),
                 api_key_placeholder_ref=str(search_settings.get("api_key_placeholder_ref", "")).strip(),
+            ),
+            speech_settings=pb2.SpeechSettingsDto(
+                spoken_replies_enabled=bool(speech_settings.get("spoken_replies_enabled", False)),
+                stt_provider_id=str(speech_settings.get("stt_provider_id", "local-whisper")).strip(),
+                tts_provider_id=str(speech_settings.get("tts_provider_id", "local-pyttsx3")).strip(),
             ),
         )
 
@@ -540,6 +555,16 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 is_available=ollama_status.is_available if ollama_status else False,
                 detail=ollama_status.detail if ollama_status else "Ollama status is unavailable.",
             ),
+            pb2.CapabilityStatusDto(
+                capability_name="speech-to-text",
+                is_available=True,
+                detail="Push-to-talk transcription path is available when local dependencies are installed.",
+            ),
+            pb2.CapabilityStatusDto(
+                capability_name="text-to-speech",
+                is_available=True,
+                detail="Assistant reply speech path is available when local dependencies are installed.",
+            ),
         ]
 
     def HealthCheck(self, request, context):
@@ -639,6 +664,10 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 "Search API key placeholder must start with placeholder://.",
             )
 
+        speech_settings = settings.speech_settings
+        speech_stt_provider_id = speech_settings.stt_provider_id.strip().lower() or "local-whisper"
+        speech_tts_provider_id = speech_settings.tts_provider_id.strip().lower() or "local-pyttsx3"
+
         updated_at = self._now()
         payload = {
             "model_mode": pb2.ModelMode.Name(settings.model_mode or pb2.MODEL_MODE_GUIDED),
@@ -652,6 +681,11 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 "provider_id": search_provider_id,
                 "endpoint": search_endpoint,
                 "api_key_placeholder_ref": search_api_key_placeholder_ref,
+            },
+            "speech_settings": {
+                "spoken_replies_enabled": bool(speech_settings.spoken_replies_enabled),
+                "stt_provider_id": speech_stt_provider_id,
+                "tts_provider_id": speech_tts_provider_id,
             },
             "updated_at": updated_at,
         }
@@ -734,6 +768,38 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             user_message=self._to_message_dto(user_message),
             assistant_message=self._to_message_dto(assistant_message),
             search_result=self._to_search_result_dto(search_result),
+        )
+
+    def TranscribeAudio(self, request, context):
+        if len(request.audio_wav) == 0:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Please record a short clip before transcribing.")
+
+        runtime_result = self._speech_runtime.transcribe_audio_wav(bytes(request.audio_wav))
+        if not runtime_result.is_success:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, runtime_result.detail)
+
+        return pb2.TranscribeAudioResponse(
+            transcript=runtime_result.transcript,
+            provider_id=runtime_result.provider_id,
+            model_id=runtime_result.model_id,
+            detail=runtime_result.detail,
+        )
+
+    def SynthesizeSpeech(self, request, context):
+        text = request.text.strip()
+        if not text:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Please provide text before requesting spoken audio.")
+
+        runtime_result = self._speech_runtime.synthesize_speech(text, request.voice_id.strip())
+        if not runtime_result.is_success:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, runtime_result.detail)
+
+        return pb2.SynthesizeSpeechResponse(
+            audio_wav=runtime_result.audio_wav,
+            audio_mime_type=runtime_result.audio_mime_type,
+            provider_id=runtime_result.provider_id,
+            model_id=runtime_result.model_id,
+            detail=runtime_result.detail,
         )
 
     @staticmethod

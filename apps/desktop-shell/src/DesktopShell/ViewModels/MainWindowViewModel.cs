@@ -142,6 +142,8 @@ public class MainWindowViewModel : INotifyPropertyChanged
             "workspaces" => "Workspace files",
             "windows operator" => "Desktop app controls",
             "browser support" => "Web browsing support",
+            "speech-to-text" => "Speech-to-text",
+            "text-to-speech" => "Text-to-speech",
             _ => capabilityName,
         };
     }

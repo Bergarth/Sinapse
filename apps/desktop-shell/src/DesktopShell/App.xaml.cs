@@ -14,6 +14,10 @@ public partial class App : Application
 
     public DaemonConnectionService DaemonConnectionService { get; } = new();
 
+    public PushToTalkRecorderService PushToTalkRecorderService { get; } = new();
+
+    public SpeechPlaybackService SpeechPlaybackService { get; } = new();
+
     public ChatViewModel ChatViewModel { get; private set; } = null!;
 
     public SidebarViewModel SidebarViewModel { get; private set; } = null!;
@@ -25,7 +29,7 @@ public partial class App : Application
     {
         _ = args;
 
-        ChatViewModel = new ChatViewModel(DaemonConnectionService);
+        ChatViewModel = new ChatViewModel(DaemonConnectionService, PushToTalkRecorderService, SpeechPlaybackService);
         SidebarViewModel = new SidebarViewModel(DaemonConnectionService);
         SettingsViewModel = new SettingsViewModel(DaemonConnectionService);
         TaskTimelineViewModel = new TaskTimelineViewModel(

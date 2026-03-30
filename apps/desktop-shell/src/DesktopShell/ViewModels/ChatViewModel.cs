@@ -55,15 +55,25 @@ public sealed class SearchSourceViewModel
 public class ChatViewModel : INotifyPropertyChanged
 {
     private readonly DaemonConnectionService _daemonConnectionService;
+    private readonly PushToTalkRecorderService _pushToTalkRecorderService;
+    private readonly SpeechPlaybackService _speechPlaybackService;
     private string? _conversationId;
     private bool _isSending;
+    private bool _isPushToTalkListening;
+    private bool _isPushToTalkTranscribing;
     private string _pendingMessageText = string.Empty;
     private string _statusText = "Type a message and click Send to test end-to-end chat.";
     private string _workspaceStatusText = "No folders attached yet.";
+    private string _pushToTalkStatusText = "Push-to-Talk is ready. Hold the button while speaking.";
 
-    public ChatViewModel(DaemonConnectionService daemonConnectionService)
+    public ChatViewModel(
+        DaemonConnectionService daemonConnectionService,
+        PushToTalkRecorderService pushToTalkRecorderService,
+        SpeechPlaybackService speechPlaybackService)
     {
         _daemonConnectionService = daemonConnectionService;
+        _pushToTalkRecorderService = pushToTalkRecorderService;
+        _speechPlaybackService = speechPlaybackService;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -100,6 +110,36 @@ public class ChatViewModel : INotifyPropertyChanged
         private set => SetProperty(ref _isSending, value);
     }
 
+    public bool IsPushToTalkListening
+    {
+        get => _isPushToTalkListening;
+        private set
+        {
+            if (SetProperty(ref _isPushToTalkListening, value))
+            {
+                OnPropertyChanged(nameof(CanUsePushToTalk));
+            }
+        }
+    }
+
+    public bool IsPushToTalkTranscribing
+    {
+        get => _isPushToTalkTranscribing;
+        private set
+        {
+            if (SetProperty(ref _isPushToTalkTranscribing, value))
+            {
+                OnPropertyChanged(nameof(CanUsePushToTalk));
+            }
+        }
+    }
+
+    public string PushToTalkStatusText
+    {
+        get => _pushToTalkStatusText;
+        private set => SetProperty(ref _pushToTalkStatusText, value);
+    }
+
     public string PendingMessageText
     {
         get => _pendingMessageText;
@@ -127,6 +167,70 @@ public class ChatViewModel : INotifyPropertyChanged
     public bool HasAttachedWorkspaceRoots => AttachedWorkspaceRoots.Count > 0;
 
     public bool CanSendMessage => !IsSending && !string.IsNullOrWhiteSpace(PendingMessageText);
+
+    public bool CanUsePushToTalk => !IsSending && !IsPushToTalkTranscribing;
+
+    public async Task BeginPushToTalkAsync(CancellationToken cancellationToken = default)
+    {
+        if (!CanUsePushToTalk || IsPushToTalkListening)
+        {
+            return;
+        }
+
+        try
+        {
+            IsPushToTalkListening = true;
+            PushToTalkStatusText = "Listening... release the button when you finish speaking.";
+            await _pushToTalkRecorderService.StartRecordingAsync();
+        }
+        catch (Exception ex)
+        {
+            IsPushToTalkListening = false;
+            PushToTalkStatusText = $"Could not start microphone recording. Please check microphone permissions. ({ex.Message})";
+        }
+    }
+
+    public async Task EndPushToTalkAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsPushToTalkListening)
+        {
+            return;
+        }
+
+        IsPushToTalkListening = false;
+        IsPushToTalkTranscribing = true;
+        PushToTalkStatusText = "Transcribing your speech...";
+
+        try
+        {
+            var audioBytes = await _pushToTalkRecorderService.StopRecordingAsync();
+            if (audioBytes.Length == 0)
+            {
+                PushToTalkStatusText = "No speech was captured. Hold Push-to-Talk and speak clearly, then try again.";
+                return;
+            }
+
+            var result = await _daemonConnectionService.TranscribeAudioAsync(audioBytes, cancellationToken);
+            if (!result.IsSuccess)
+            {
+                PushToTalkStatusText = result.ErrorMessage ?? "Speech transcription is currently unavailable.";
+                return;
+            }
+
+            PendingMessageText = string.IsNullOrWhiteSpace(PendingMessageText)
+                ? result.Transcript
+                : $"{PendingMessageText.TrimEnd()} {result.Transcript}";
+            PushToTalkStatusText = "Transcription inserted into your message box. Review and press Send when ready.";
+        }
+        catch (Exception ex)
+        {
+            PushToTalkStatusText = $"Transcription failed. Please try again. ({ex.Message})";
+        }
+        finally
+        {
+            IsPushToTalkTranscribing = false;
+        }
+    }
 
     public async Task SendMessageAsync(CancellationToken cancellationToken = default)
     {
@@ -159,7 +263,27 @@ public class ChatViewModel : INotifyPropertyChanged
 
         ConversationChanged?.Invoke(this, result.Conversation.ConversationId);
         await RefreshWorkspaceAsync(cancellationToken);
-        StatusText = "Message round-trip completed and persisted.";
+
+        var spokenReplyStatus = await MaybeSpeakAssistantReplyAsync(result.AssistantMessage.Content, cancellationToken);
+        StatusText = $"Message round-trip completed and persisted. {spokenReplyStatus}".Trim();
+    }
+
+    private async Task<string> MaybeSpeakAssistantReplyAsync(string replyText, CancellationToken cancellationToken)
+    {
+        var settings = await _daemonConnectionService.GetAppSettingsAsync(cancellationToken);
+        if (!settings.IsSuccess || settings.Settings is null || !(settings.Settings.SpeechSettings?.SpokenRepliesEnabled ?? false))
+        {
+            return "";
+        }
+
+        var ttsResult = await _daemonConnectionService.SynthesizeSpeechAsync(replyText, cancellationToken);
+        if (!ttsResult.IsSuccess)
+        {
+            return ttsResult.ErrorMessage ?? "Spoken reply failed.";
+        }
+
+        var played = await _speechPlaybackService.PlayWavAsync(ttsResult.AudioBytes);
+        return played ? "Assistant reply was spoken aloud." : _speechPlaybackService.LastStatus;
     }
 
     public async Task LoadConversationAsync(string conversationId, CancellationToken cancellationToken = default)
