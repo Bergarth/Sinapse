@@ -22,6 +22,10 @@
                                 <Border BorderBrush="Gainsboro" BorderThickness="1" CornerRadius="6" Padding="8" Margin="0,0,0,8">
                                     <StackPanel Spacing="2">
                                         <TextBlock FontWeight="SemiBold" Text="{x:Bind SenderName, Mode=OneWay}" />
+                                        <TextBlock
+                                            Foreground="DarkOrange"
+                                            FontSize="12"
+                                            Text="{x:Bind WarningBannerText, Mode=OneWay}" />
                                         <TextBlock Text="{x:Bind Content, Mode=OneWay}" TextWrapping="Wrap" />
                                         <TextBlock Opacity="0.75" FontSize="12" Text="{x:Bind HandlerLabel, Mode=OneWay}" />
                                         <ItemsRepeater ItemsSource="{x:Bind Sources, Mode=OneWay}">

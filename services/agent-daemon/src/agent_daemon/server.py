@@ -34,6 +34,11 @@ from agent_daemon.services.memory import (
     WorkspaceRootRecord,
 )
 from agent_daemon.services.model_router import ChatCompletion, ModelRouter
+from agent_daemon.services.frd_zma_parser import (
+    ParsedTableSummary,
+    parse_frd_file,
+    parse_zma_file,
+)
 from agent_daemon.services.search_adapter import SearchResult, create_search_adapter
 from agent_daemon.speech_runtime import LocalSpeechRuntime
 
@@ -733,6 +738,8 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             completion = self._build_windows_list_completion()
         elif self._is_open_url_request(request.content):
             completion = self._build_browser_open_completion(request.content)
+        elif self._is_workspace_file_analysis_request(request.content):
+            completion = self._build_workspace_file_analysis_completion(conversation.conversation_id)
         else:
             search_result = self._try_run_search(request.content, settings_payload)
             if search_result is None:
@@ -902,6 +909,102 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             return False
         markers = ("open ", "visit ", "go to ", "check ", "tell me what it says", "summarize")
         return any(marker in normalized for marker in markers)
+
+    @staticmethod
+    def _is_workspace_file_analysis_request(content: str) -> bool:
+        normalized = content.strip().lower()
+        if "analy" not in normalized:
+            return False
+        return any(marker in normalized for marker in ("frd", "zma"))
+
+    def _build_workspace_file_analysis_completion(self, conversation_id: str) -> ChatCompletion:
+        summaries: list[ParsedTableSummary] = []
+        read_failures: list[str] = []
+        roots = self._memory.list_workspace_roots(conversation_id)
+        for root in roots:
+            root_path = Path(root.root_path)
+            for file_record in self._memory.list_workspace_files(root.root_id, limit=5000):
+                relative = file_record.relative_path
+                suffix = Path(relative).suffix.lower()
+                if suffix not in {".frd", ".zma"}:
+                    continue
+                candidate = (root_path / relative).resolve()
+                try:
+                    if suffix == ".frd":
+                        summaries.append(parse_frd_file(candidate))
+                    else:
+                        summaries.append(parse_zma_file(candidate))
+                except OSError as exc:
+                    read_failures.append(f"{relative}: {exc}")
+
+        if not summaries and not read_failures:
+            return ChatCompletion(
+                content=(
+                    "I could not find any FRD or ZMA files in your attached workspace folders.\n"
+                    "Tip: attach the folder that contains your measurement files, then ask again."
+                ),
+                provider_id="workspace-analyzer",
+                model_id="frd-zma-parser-v1",
+            )
+
+        return ChatCompletion(
+            content=self._format_file_analysis_summary(summaries, read_failures),
+            provider_id="workspace-analyzer",
+            model_id="frd-zma-parser-v1",
+        )
+
+    def _format_file_analysis_summary(self, summaries: list[ParsedTableSummary], read_failures: list[str]) -> str:
+        lines: list[str] = [
+            "I analyzed your FRD/ZMA measurement files.",
+            "",
+            f"Files parsed successfully: {len(summaries)}",
+        ]
+        if read_failures:
+            lines.append(f"Files with read errors: {len(read_failures)}")
+        lines.append("")
+
+        for summary in sorted(summaries, key=lambda item: item.file_path.lower()):
+            lines.append(f"File: {summary.file_path}")
+            lines.append(f"Type: {summary.file_type}")
+            lines.append(f"Rows parsed: {summary.row_count}")
+            if summary.detected_columns:
+                lines.append(f"Detected columns: {', '.join(summary.detected_columns)}")
+            else:
+                lines.append("Detected columns: none")
+
+            if summary.frequency_min_hz is not None and summary.frequency_max_hz is not None:
+                lines.append(
+                    f"Frequency range: {summary.frequency_min_hz:.3f} Hz to {summary.frequency_max_hz:.3f} Hz"
+                )
+            else:
+                lines.append("Frequency range: unavailable")
+
+            if summary.value_ranges:
+                lines.append("Value ranges:")
+                for column_name, limits in summary.value_ranges.items():
+                    lines.append(f"  - {column_name}: {limits[0]:.3f} to {limits[1]:.3f}")
+            if summary.warnings:
+                lines.append("Warnings:")
+                for warning in summary.warnings:
+                    lines.append(f"  ⚠ {warning}")
+            if summary.errors:
+                lines.append("Parse errors:")
+                for issue in summary.errors[:10]:
+                    lines.append(f"  • line {issue.line_number}: {issue.message}")
+                if len(summary.errors) > 10:
+                    lines.append(f"  • {len(summary.errors) - 10} more parse errors not shown.")
+            lines.append("")
+
+        if read_failures:
+            lines.append("Read errors:")
+            for failure in read_failures[:10]:
+                lines.append(f"  • {failure}")
+            if len(read_failures) > 10:
+                lines.append(f"  • {len(read_failures) - 10} more read errors not shown.")
+            lines.append("")
+
+        lines.append("Note: this first pass focuses on parsing and validation, not ranking/crossover decisions yet.")
+        return "\n".join(lines).strip()
 
     def _build_browser_open_completion(self, content: str) -> ChatCompletion:
         url = self._extract_url(content)
