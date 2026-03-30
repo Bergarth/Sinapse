@@ -18,7 +18,11 @@ Implemented today:
 - Shared contract-driven daemon API (`HealthCheck`, conversations/messages, tasks, approvals, workspace root attachment, artifact listing, system stream).
 - SQLite-backed persistence for conversations, messages, tasks, steps, workspace roots/files, app settings, approvals, and artifacts.
 - Real read-only task handlers for browser open-url and Windows window enumeration.
+- Controlled browser-session workflows for navigation/read/download/upload with explicit typed not-yet-supported responses where full automation is not reliable yet.
 - Real approval-gated Windows operator task handlers for safe write actions (launch app, focus window, open file, type text).
+- Approval-gated communications flows:
+  - Email draft/review/send via SMTP with workspace attachments.
+  - Messaging draft/review/send via Slack webhook.
 - Mixed speaker-workspace intake/summarization across FRD/ZMA, text/markdown/json/csv, zip inventories, and image metadata.
 - First-pass crossover region ranking for FRD/ZMA workflows with transparent warnings and confidence scores.
 - Approval-gated REW workflow task support (launch/attach + import) with explicit `not_yet_supported` export typing.

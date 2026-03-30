@@ -1,24 +1,28 @@
-"""Read-only browser operator service.
+"""Browser operator service with controlled session workflows.
 
-This module implements the first real browser action: opening a URL in a
-controlled, read-only context and returning a visible text summary.
+This module now supports:
+- Read-only URL open + summary extraction.
+- Explicit browser sessions with controlled profile roots.
+- Explicit navigation/read/download/upload actions tied to a session.
 
-Design notes:
-- Keeps a backend seam so Playwright can be added later.
-- Defaults to a safe HTTP reader backend that performs no form/login/clicking.
-- Surfaces clear errors when optional browser dependencies are unavailable.
+Design goals:
+- Keep mutating actions explicit and easy to gate via daemon approvals.
+- Return typed NOT_YET_SUPPORTED responses when an action cannot be done reliably.
+- Avoid depending on heavyweight browser automation for baseline reliability.
 """
 
 from __future__ import annotations
 
 import html
+import json
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Protocol
+from pathlib import Path
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -31,7 +35,7 @@ class BrowserAvailability:
 
 @dataclass(frozen=True)
 class BrowserPageSnapshot:
-    """Structured page snapshot returned by read-only open-url actions."""
+    """Structured page snapshot returned by read actions."""
 
     url: str
     title: str
@@ -45,11 +49,21 @@ class BrowserActionResult:
     is_success: bool
     detail: str
     snapshot: BrowserPageSnapshot | None = None
+    result_type: str = "ok"
+    payload: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class BrowserSession:
+    """Simple controlled browser session state."""
+
+    session_id: str
+    profile_root: str
+    started_at: str
+    current_url: str = ""
 
 
 class _BrowserBackend(Protocol):
-    """Backend contract used by the browser operator service."""
-
     def availability(self) -> BrowserAvailability: ...
 
     def open_url_readonly(self, *, url: str) -> BrowserActionResult: ...
@@ -70,19 +84,11 @@ class _PlaywrightBackend:
             return BrowserAvailability(True, "Playwright backend is available.")
         return BrowserAvailability(
             True,
-            "Playwright runtime is unavailable; using safe HTTP fallback for read-only open-url actions.",
-        )
-
-    def open_url_readonly(self, *, url: str) -> BrowserActionResult:
-        return BrowserActionResult(
-            False,
-            "Playwright backend is not implemented yet. Use HTTP fallback backend.",
+            "Playwright runtime is unavailable; using controlled HTTP/session fallback.",
         )
 
 
 class _VisibleTextExtractor(HTMLParser):
-    """Extract visible title/text content while ignoring non-visible tags."""
-
     _IGNORED_TAGS = {"script", "style", "noscript", "svg", "canvas", "template"}
 
     def __init__(self) -> None:
@@ -118,13 +124,10 @@ class _VisibleTextExtractor(HTMLParser):
         self._chunks.append(cleaned)
 
     def visible_text(self) -> str:
-        merged = " ".join(self._chunks)
-        return _normalize_whitespace(merged)
+        return _normalize_whitespace(" ".join(self._chunks))
 
 
 class _HttpReadOnlyBackend:
-    """Safe, read-only backend using HTTP fetch + HTML text extraction."""
-
     _REQUEST_TIMEOUT_SECONDS = 12
     _MAX_BYTES = 1_000_000
 
@@ -145,7 +148,7 @@ class _HttpReadOnlyBackend:
         request = urllib.request.Request(
             normalized,
             headers={
-                "User-Agent": "SinapseBrowserOperator/0.1 (+read-only)",
+                "User-Agent": "SinapseBrowserOperator/0.2 (+session-safe)",
                 "Accept": "text/html,application/xhtml+xml",
             },
             method="GET",
@@ -169,6 +172,8 @@ class _HttpReadOnlyBackend:
             return BrowserActionResult(
                 False,
                 f"Unsupported content type '{content_type or 'unknown'}'. Only HTML pages are summarized.",
+                result_type="unsupported_content_type",
+                payload={"content_type": content_type or "unknown", "url": final_url},
             )
 
         text = _decode_html_bytes(data)
@@ -176,20 +181,14 @@ class _HttpReadOnlyBackend:
         parser.feed(text)
 
         title = parser.title or _fallback_title_from_url(final_url)
-        summary = _summarize_text(parser.visible_text())
-        if not summary:
-            summary = "The page loaded, but no visible text content could be extracted."
+        summary = _summarize_text(parser.visible_text()) or "The page loaded, but no visible text content could be extracted."
 
         snapshot = BrowserPageSnapshot(url=final_url, title=title, summary=summary)
-        return BrowserActionResult(
-            True,
-            f"Opened {final_url} in read-only mode and extracted visible content.",
-            snapshot=snapshot,
-        )
+        return BrowserActionResult(True, f"Opened {final_url} in read-only mode and extracted visible content.", snapshot=snapshot)
 
 
 class BrowserOperatorService:
-    """Browser operator with first safe read-only action implementation."""
+    """Browser operator with controlled session workflows."""
 
     name = "browser-operator"
 
@@ -200,34 +199,103 @@ class BrowserOperatorService:
     def availability(self) -> BrowserAvailability:
         readonly_status = self._readonly_backend.availability()
         playwright_status = self._playwright_backend.availability()
-        detail = f"{readonly_status.detail} {playwright_status.detail}"
+        detail = (
+            f"{readonly_status.detail} "
+            "Session workflow supports controlled profiles, navigation, read, download, and workspace upload mapping. "
+            f"{playwright_status.detail}"
+        )
         return BrowserAvailability(is_available=readonly_status.is_available, detail=detail.strip())
 
-    def search_web(self, *, query: str) -> BrowserActionResult:
-        _ = query
-        return BrowserActionResult(False, "Not implemented yet: search_web")
+    def open_browser_session(self, *, profile_root: str, session_id: str, started_at: str) -> BrowserActionResult:
+        profile = Path(profile_root).resolve()
+        profile.mkdir(parents=True, exist_ok=True)
+        state_file = profile / "session-state.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "started_at": started_at,
+                    "current_url": "",
+                    "mode": "controlled_profile",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return BrowserActionResult(
+            True,
+            "Opened controlled browser profile session.",
+            result_type="session_started",
+            payload={"session_id": session_id, "profile_root": str(profile), "mode": "controlled_profile"},
+        )
 
     def open_url(self, *, url: str) -> BrowserActionResult:
         return self._readonly_backend.open_url_readonly(url=url)
 
+    def navigate(self, *, session_id: str, url: str) -> BrowserActionResult:
+        _ = session_id
+        return self.open_url(url=url)
+
+    def read_visible_content(self, *, session_id: str, url: str = "") -> BrowserActionResult:
+        _ = session_id
+        if not url:
+            return BrowserActionResult(
+                False,
+                "NOT_YET_SUPPORTED:NO_ACTIVE_PAGE_CONTEXT. Pass a URL for now.",
+                result_type="not_yet_supported",
+            )
+        return self.open_url(url=url)
+
+    def download(self, *, url: str, destination_path: str) -> BrowserActionResult:
+        normalized = _normalize_url(url)
+        if normalized is None:
+            return BrowserActionResult(False, "Invalid URL for download.")
+
+        destination = Path(destination_path).resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        request = urllib.request.Request(
+            normalized,
+            headers={"User-Agent": "SinapseBrowserOperator/0.2 (+download)"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
+                payload = response.read(5_000_000)
+                content_type = (response.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
+                final_url = response.geturl() or normalized
+            destination.write_bytes(payload)
+        except Exception as exc:  # noqa: BLE001
+            return BrowserActionResult(False, f"Download failed: {exc}")
+
+        return BrowserActionResult(
+            True,
+            f"Downloaded {final_url} to workspace path {destination}.",
+            result_type="downloaded",
+            payload={"url": final_url, "destination_path": str(destination), "size_bytes": str(len(payload)), "mime_type": content_type},
+        )
+
+    def upload(self, *, selector: str, source_path: str) -> BrowserActionResult:
+        _ = selector
+        source = Path(source_path).resolve()
+        if not source.exists() or not source.is_file():
+            return BrowserActionResult(False, f"Upload source file not found: {source}")
+        return BrowserActionResult(
+            False,
+            "NOT_YET_SUPPORTED:SESSION_FILE_INPUT_AUTOMATION. Controlled profile path is ready, but generic DOM file upload automation is not implemented.",
+            result_type="not_yet_supported",
+            payload={"source_path": str(source)},
+        )
+
     def click(self, *, selector: str) -> BrowserActionResult:
         _ = selector
-        return BrowserActionResult(False, "Blocked: click is not enabled yet (read-only mode only).")
+        return BrowserActionResult(False, "NOT_YET_SUPPORTED:SESSION_CLICK", result_type="not_yet_supported")
 
     def fill(self, *, selector: str, value: str) -> BrowserActionResult:
         _ = (selector, value)
-        return BrowserActionResult(False, "Blocked: fill is not enabled yet (read-only mode only).")
-
-    def download(self, *, url: str, destination_path: str) -> BrowserActionResult:
-        _ = (url, destination_path)
-        return BrowserActionResult(False, "Not implemented yet: download")
-
-    def upload(self, *, selector: str, source_path: str) -> BrowserActionResult:
-        _ = (selector, source_path)
-        return BrowserActionResult(False, "Blocked: upload is not enabled yet (read-only mode only).")
+        return BrowserActionResult(False, "NOT_YET_SUPPORTED:SESSION_FILL", result_type="not_yet_supported")
 
     def collect_sources(self) -> BrowserActionResult:
-        return BrowserActionResult(False, "Not implemented yet: collect_sources")
+        return BrowserActionResult(False, "NOT_YET_SUPPORTED:COLLECT_SOURCES", result_type="not_yet_supported")
 
 
 def _normalize_whitespace(value: str) -> str:
@@ -238,14 +306,11 @@ def _normalize_url(raw_url: str) -> str | None:
     candidate = (raw_url or "").strip()
     if not candidate:
         return None
-
     if not re.match(r"^https?://", candidate, flags=re.IGNORECASE):
         candidate = f"https://{candidate}"
 
     parsed = urllib.parse.urlparse(candidate)
-    if parsed.scheme.lower() not in {"http", "https"}:
-        return None
-    if not parsed.netloc:
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return None
     return urllib.parse.urlunparse(parsed)
 
@@ -261,26 +326,28 @@ def _decode_html_bytes(payload: bytes) -> str:
 
 def _fallback_title_from_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
-    host = parsed.netloc or url
-    return f"Page at {host}"
+    if parsed.netloc:
+        return html.unescape(parsed.netloc)
+    return "Untitled page"
 
 
-def _summarize_text(text: str, *, max_sentences: int = 3, max_chars: int = 420) -> str:
-    normalized = _normalize_whitespace(html.unescape(text))
+def _summarize_text(text: str, max_sentences: int = 3, max_chars: int = 600) -> str:
+    normalized = _normalize_whitespace(text)
     if not normalized:
         return ""
 
-    sentences = re.split(r"(?<=[.!?])\s+", normalized)
-    picked = []
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
+    parts = re.split(r"(?<=[.!?])\s+", normalized)
+    chosen: list[str] = []
+    total_chars = 0
+    for part in parts:
+        if not part:
             continue
-        picked.append(sentence)
-        if len(picked) >= max_sentences:
+        chosen.append(part)
+        total_chars += len(part) + 1
+        if len(chosen) >= max_sentences or total_chars >= max_chars:
             break
 
-    summary = " ".join(picked) if picked else normalized
+    summary = " ".join(chosen).strip()
     if len(summary) > max_chars:
         summary = summary[: max_chars - 1].rstrip() + "…"
     return summary

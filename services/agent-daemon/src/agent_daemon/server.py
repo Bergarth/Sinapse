@@ -8,11 +8,16 @@ import logging
 import os
 import queue
 import re
+import smtplib
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from concurrent import futures
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from email.message import EmailMessage
 from pathlib import Path
 
 import grpc
@@ -64,6 +69,30 @@ class OperatorTaskIntent:
     step_title: str
     action_target: str
     parameters: dict[str, str]
+
+
+@dataclass(frozen=True)
+class EmailTaskIntent:
+    provider: str
+    to: str
+    subject: str
+    body: str
+    attachments: list[str]
+
+
+@dataclass(frozen=True)
+class MessagingTaskIntent:
+    provider: str
+    destination: str
+    body: str
+
+
+@dataclass(frozen=True)
+class BrowserWorkflowIntent:
+    action_name: str
+    url: str
+    source_path: str = ""
+    destination_path: str = ""
 
 
 @dataclass
@@ -200,6 +229,22 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 "spoken_replies_enabled": False,
                 "stt_provider_id": "local-whisper",
                 "tts_provider_id": "local-pyttsx3",
+            },
+            "communications": {
+                "email": {
+                    "provider": "smtp",
+                    "smtp_host": "",
+                    "smtp_port": 587,
+                    "smtp_security": "starttls",
+                    "from_address": "",
+                    "username": "",
+                    "password_secret_ref": "",
+                },
+                "messaging": {
+                    "provider": "slack-webhook",
+                    "slack_webhook_secret_ref": "",
+                    "channel_hint": "",
+                },
             },
             "updated_at": observed_at,
         }
@@ -608,6 +653,16 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 detail=browser_operator.detail,
             ),
             pb2.CapabilityStatusDto(
+                capability_name="email workflows",
+                is_available=True,
+                detail="Draft/review/approval-gated send via SMTP is available when configured.",
+            ),
+            pb2.CapabilityStatusDto(
+                capability_name="messaging workflows",
+                is_available=True,
+                detail="Draft/review/approval-gated send via Slack webhook is available when configured.",
+            ),
+            pb2.CapabilityStatusDto(
                 capability_name="ollama",
                 is_available=ollama_status.is_available if ollama_status else False,
                 detail=ollama_status.detail if ollama_status else "Ollama status is unavailable.",
@@ -746,6 +801,10 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         speech_settings = settings.speech_settings
         speech_stt_provider_id = speech_settings.stt_provider_id.strip().lower() or "local-whisper"
         speech_tts_provider_id = speech_settings.tts_provider_id.strip().lower() or "local-pyttsx3"
+        existing_payload = self._load_app_settings_payload()
+        communications = existing_payload.get("communications", {})
+        if not isinstance(communications, dict):
+            communications = self._default_settings_payload(self._now()).get("communications", {})
 
         updated_at = self._now()
         payload = {
@@ -766,6 +825,7 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 "stt_provider_id": speech_stt_provider_id,
                 "tts_provider_id": speech_tts_provider_id,
             },
+            "communications": communications,
             "updated_at": updated_at,
         }
 
@@ -1647,8 +1707,23 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             self._run_windows_operator_action_task(task, operator_intent=operator_intent, require_approval=require_approval)
             return
 
+        browser_workflow_intent = self._parse_browser_workflow_intent(task.title, task.conversation_id)
+        if browser_workflow_intent is not None:
+            self._run_browser_session_task(task, browser_workflow_intent)
+            return
+
         if self._should_run_browser_open_task(task.title):
             self._run_browser_open_task(task)
+            return
+
+        email_intent = self._parse_email_task_intent(task.title, task.conversation_id)
+        if email_intent is not None:
+            self._run_email_task(task, email_intent)
+            return
+
+        messaging_intent = self._parse_messaging_task_intent(task.title)
+        if messaging_intent is not None:
+            self._run_messaging_task(task, messaging_intent)
             return
 
         if self._should_run_windows_enumeration_task(task.title):
@@ -2079,6 +2154,425 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             )
         )
         return has_url and mentions_browser
+
+    def _parse_browser_workflow_intent(self, task_title: str, conversation_id: str) -> BrowserWorkflowIntent | None:
+        lowered = task_title.strip().lower()
+        url = self._extract_url(task_title)
+        if "browser session" in lowered and "open" in lowered:
+            return BrowserWorkflowIntent(action_name="open_session", url=url or "https://example.com")
+        if "browser download" in lowered or ("download" in lowered and "browser" in lowered):
+            if url is None:
+                return None
+            filename = Path(urllib.request.url2pathname(urllib.parse.urlparse(url).path or "")).name or "download.bin"
+            destination = str((self._artifacts_root / f"download-{filename}").resolve())
+            return BrowserWorkflowIntent(action_name="download", url=url, destination_path=destination)
+        if "browser upload" in lowered or ("upload" in lowered and "browser" in lowered):
+            source = self._workspace_files_for_extensions(conversation_id, {".txt", ".csv", ".json", ".pdf"})
+            chosen = str(source[0]) if source else ""
+            return BrowserWorkflowIntent(action_name="upload", url=url or "https://example.com/upload", source_path=chosen)
+        if ("browser" in lowered or "session" in lowered) and url is not None:
+            return BrowserWorkflowIntent(action_name="navigate", url=url)
+        return None
+
+    def _run_browser_session_task(self, task: TaskRecord, intent: BrowserWorkflowIntent) -> None:
+        task_id = task.task_id
+        started_at = self._now()
+        session_id = f"browser-session-{uuid.uuid4().hex[:8]}"
+        session_root = (self._artifacts_root / task_id / "browser-session-profile").resolve()
+        self._browser_operator.open_browser_session(
+            profile_root=str(session_root),
+            session_id=session_id,
+            started_at=started_at,
+        )
+        step_id = f"{task_id}-browser-session"
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=step_id,
+                task_id=task_id,
+                sequence_number=1,
+                title="Browser session workflow",
+                status="running",
+                detail=f"Session {session_id} opened with controlled profile.",
+                created_at=started_at,
+                updated_at=started_at,
+            )
+        )
+
+        if intent.action_name == "download":
+            result = self._browser_operator.download(url=intent.url, destination_path=intent.destination_path)
+        elif intent.action_name == "upload":
+            result = self._browser_operator.upload(selector="input[type=file]", source_path=intent.source_path)
+        else:
+            result = self._browser_operator.navigate(session_id=session_id, url=intent.url)
+
+        finished_at = self._now()
+        status = "completed" if result.is_success else "failed"
+        detail = result.detail
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=step_id,
+                task_id=task_id,
+                sequence_number=1,
+                title="Browser session workflow",
+                status=status,
+                detail=detail,
+                created_at=started_at,
+                updated_at=finished_at,
+            )
+        )
+        artifact_payload = {
+            "task_id": task_id,
+            "session_id": session_id,
+            "intent": intent.__dict__,
+            "result": {
+                "is_success": result.is_success,
+                "detail": result.detail,
+                "result_type": getattr(result, "result_type", ""),
+                "payload": getattr(result, "payload", None),
+            },
+            "finished_at": finished_at,
+        }
+        self._persist_artifact(
+            task_id=task_id,
+            name="browser-session-result.json",
+            mime_type="application/json",
+            payload=json.dumps(artifact_payload, indent=2).encode("utf-8"),
+            labels={"kind": "browser_session_result", "action": intent.action_name},
+        )
+        if result.snapshot is not None:
+            summary = (
+                f"URL: {result.snapshot.url}\n"
+                f"Title: {result.snapshot.title}\n"
+                f"Summary: {result.snapshot.summary}"
+            )
+            self._persist_artifact(
+                task_id=task_id,
+                name="browser-page-summary.txt",
+                mime_type="text/plain",
+                payload=summary.encode("utf-8"),
+                labels={"kind": "browser_page_summary"},
+            )
+        if intent.action_name == "download" and result.is_success:
+            self._persist_artifact(
+                task_id=task_id,
+                name="browser-download-record.json",
+                mime_type="application/json",
+                payload=json.dumps(result.payload or {}, indent=2).encode("utf-8"),
+                labels={"kind": "browser_download"},
+            )
+        if intent.action_name == "upload":
+            self._persist_artifact(
+                task_id=task_id,
+                name="browser-upload-record.json",
+                mime_type="application/json",
+                payload=json.dumps(result.payload or {"source_path": intent.source_path}, indent=2).encode("utf-8"),
+                labels={"kind": "browser_upload"},
+            )
+
+        task_status = pb2.TASK_STATUS_COMPLETED if result.is_success else pb2.TASK_STATUS_FAILED
+        approval_status = pb2.APPROVAL_STATUS_APPROVED if result.is_success else pb2.APPROVAL_STATUS_PENDING
+        self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                task_status=task_status,
+                approval_status=approval_status,
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=finished_at,
+            )
+        )
+
+    def _parse_email_task_intent(self, task_title: str, conversation_id: str) -> EmailTaskIntent | None:
+        lowered = task_title.lower()
+        if "email" not in lowered:
+            return None
+        to_match = re.search(r"to\\s+([^\\s]+@[^\\s]+)", task_title, flags=re.IGNORECASE)
+        subject_match = re.search(r"subject\\s*[:=]\\s*([^;\\n]+)", task_title, flags=re.IGNORECASE)
+        body_match = re.search(r"body\\s*[:=]\\s*(.+)$", task_title, flags=re.IGNORECASE)
+        attachments = [str(path) for path in self._workspace_files_for_extensions(conversation_id, {".txt", ".md", ".pdf", ".csv"})[:3]]
+        return EmailTaskIntent(
+            provider="smtp",
+            to=to_match.group(1).strip() if to_match else "",
+            subject=subject_match.group(1).strip() if subject_match else "Sinapse draft email",
+            body=body_match.group(1).strip() if body_match else "Drafted by Sinapse. Please review before send.",
+            attachments=attachments,
+        )
+
+    def _run_email_task(self, task: TaskRecord, intent: EmailTaskIntent) -> None:
+        task_id = task.task_id
+        created_at = self._now()
+        draft_step_id = f"{task_id}-email-draft"
+        draft_payload = {
+            "to": intent.to,
+            "subject": intent.subject,
+            "body": intent.body,
+            "attachments": intent.attachments,
+            "provider": intent.provider,
+            "status": "draft_created",
+        }
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=draft_step_id,
+                task_id=task_id,
+                sequence_number=1,
+                title="Draft email",
+                status="completed",
+                detail=f"Drafted email to {intent.to or '(missing recipient)'} with {len(intent.attachments)} attachment(s).",
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        self._persist_artifact(
+            task_id=task_id,
+            name="email-draft-preview.json",
+            mime_type="application/json",
+            payload=json.dumps(draft_payload, indent=2).encode("utf-8"),
+            labels={"kind": "email_draft"},
+        )
+
+        approved, note = self._request_step_approval(
+            task=task,
+            step_id=f"{task_id}-approval-email-send",
+            step_title="Send drafted email",
+            action_target=f"email:{intent.to}",
+            requested_by="daemon",
+        )
+        if not approved:
+            denied_at = self._now()
+            self._memory.upsert_task_step(
+                TaskStepRecord(
+                    step_id=f"{task_id}-email-send",
+                    task_id=task_id,
+                    sequence_number=3,
+                    title="Send email",
+                    status="canceled",
+                    detail=note,
+                    created_at=denied_at,
+                    updated_at=denied_at,
+                )
+            )
+            self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_CANCELED,
+                    approval_status=pb2.APPROVAL_STATUS_REJECTED,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=denied_at,
+                )
+            )
+            return
+
+        send_result = self._send_email_via_supported_path(intent)
+        finished_at = self._now()
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=f"{task_id}-email-send",
+                task_id=task_id,
+                sequence_number=3,
+                title="Send email",
+                status="completed" if send_result["is_success"] else "failed",
+                detail=send_result["detail"],
+                created_at=finished_at,
+                updated_at=finished_at,
+            )
+        )
+        self._persist_artifact(
+            task_id=task_id,
+            name="email-send-result.json",
+            mime_type="application/json",
+            payload=json.dumps(send_result, indent=2).encode("utf-8"),
+            labels={"kind": "email_send_result"},
+        )
+        self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                task_status=pb2.TASK_STATUS_COMPLETED if send_result["is_success"] else pb2.TASK_STATUS_FAILED,
+                approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=finished_at,
+            )
+        )
+
+    def _send_email_via_supported_path(self, intent: EmailTaskIntent) -> dict[str, object]:
+        settings = self._load_app_settings_payload().get("communications", {})
+        email_settings = settings.get("email", {}) if isinstance(settings, dict) else {}
+        host = str(email_settings.get("smtp_host", "")).strip()
+        from_address = str(email_settings.get("from_address", "")).strip()
+        username = str(email_settings.get("username", "")).strip()
+        password_ref = str(email_settings.get("password_secret_ref", "")).strip()
+        port = int(email_settings.get("smtp_port", 587))
+        security = str(email_settings.get("smtp_security", "starttls")).lower()
+        if not host or not from_address or not intent.to:
+            return {"is_success": False, "detail": "Missing email configuration or recipient.", "result_type": "missing_config"}
+        if not password_ref.startswith("secret://local/"):
+            return {"is_success": False, "detail": "Missing SMTP password secret reference.", "result_type": "missing_auth"}
+        secret_key = password_ref.removeprefix("secret://local/")
+        secret = self._secret_store.get_secret(secret_key)
+        if secret is None:
+            return {"is_success": False, "detail": "SMTP password secret was not found.", "result_type": "missing_auth"}
+
+        message = EmailMessage()
+        message["From"] = from_address
+        message["To"] = intent.to
+        message["Subject"] = intent.subject
+        message.set_content(intent.body)
+        attached: list[str] = []
+        for raw_path in intent.attachments:
+            path = Path(raw_path)
+            if path.exists() and path.is_file():
+                message.add_attachment(path.read_bytes(), maintype="application", subtype="octet-stream", filename=path.name)
+                attached.append(path.name)
+
+        try:
+            if security == "ssl":
+                with smtplib.SMTP_SSL(host, port, timeout=20) as client:
+                    if username:
+                        client.login(username, secret.secret_value)
+                    client.send_message(message)
+            else:
+                with smtplib.SMTP(host, port, timeout=20) as client:
+                    if security == "starttls":
+                        client.starttls()
+                    if username:
+                        client.login(username, secret.secret_value)
+                    client.send_message(message)
+            return {"is_success": True, "detail": f"Email sent to {intent.to}.", "attachments": attached, "result_type": "sent"}
+        except Exception as exc:  # noqa: BLE001
+            return {"is_success": False, "detail": f"Email send failed: {exc}", "result_type": "send_failed"}
+
+    def _parse_messaging_task_intent(self, task_title: str) -> MessagingTaskIntent | None:
+        lowered = task_title.lower()
+        if not any(token in lowered for token in ("message", "slack", "chat")):
+            return None
+        body_match = re.search(r"message\\s*[:=]\\s*(.+)$", task_title, flags=re.IGNORECASE)
+        destination_match = re.search(r"to\\s+([#@a-zA-Z0-9._-]+)", task_title, flags=re.IGNORECASE)
+        return MessagingTaskIntent(
+            provider="slack-webhook",
+            destination=destination_match.group(1).strip() if destination_match else "",
+            body=body_match.group(1).strip() if body_match else task_title.strip(),
+        )
+
+    def _run_messaging_task(self, task: TaskRecord, intent: MessagingTaskIntent) -> None:
+        task_id = task.task_id
+        created_at = self._now()
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=f"{task_id}-message-draft",
+                task_id=task_id,
+                sequence_number=1,
+                title="Draft message",
+                status="completed",
+                detail=f"Drafted message for {intent.destination or 'configured channel'}.",
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        self._persist_artifact(
+            task_id=task_id,
+            name="message-draft-preview.json",
+            mime_type="application/json",
+            payload=json.dumps(intent.__dict__, indent=2).encode("utf-8"),
+            labels={"kind": "message_draft"},
+        )
+        approved, note = self._request_step_approval(
+            task=task,
+            step_id=f"{task_id}-approval-message-send",
+            step_title="Send drafted message",
+            action_target=f"messaging:{intent.destination or 'default'}",
+            requested_by="daemon",
+        )
+        if not approved:
+            denied_at = self._now()
+            self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_CANCELED,
+                    approval_status=pb2.APPROVAL_STATUS_REJECTED,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=denied_at,
+                )
+            )
+            self._memory.upsert_task_step(
+                TaskStepRecord(
+                    step_id=f"{task_id}-message-send",
+                    task_id=task_id,
+                    sequence_number=3,
+                    title="Send message",
+                    status="canceled",
+                    detail=note,
+                    created_at=denied_at,
+                    updated_at=denied_at,
+                )
+            )
+            return
+
+        send_result = self._send_message_via_supported_path(intent)
+        finished_at = self._now()
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=f"{task_id}-message-send",
+                task_id=task_id,
+                sequence_number=3,
+                title="Send message",
+                status="completed" if send_result["is_success"] else "failed",
+                detail=send_result["detail"],
+                created_at=finished_at,
+                updated_at=finished_at,
+            )
+        )
+        self._persist_artifact(
+            task_id=task_id,
+            name="message-send-result.json",
+            mime_type="application/json",
+            payload=json.dumps(send_result, indent=2).encode("utf-8"),
+            labels={"kind": "message_send_result"},
+        )
+        self._memory.upsert_task(
+            TaskRecord(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                task_status=pb2.TASK_STATUS_COMPLETED if send_result["is_success"] else pb2.TASK_STATUS_FAILED,
+                approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                title=task.title,
+                created_at=task.created_at,
+                updated_at=finished_at,
+            )
+        )
+
+    def _send_message_via_supported_path(self, intent: MessagingTaskIntent) -> dict[str, object]:
+        communications = self._load_app_settings_payload().get("communications", {})
+        messaging = communications.get("messaging", {}) if isinstance(communications, dict) else {}
+        provider = str(messaging.get("provider", "slack-webhook")).strip().lower()
+        if provider != "slack-webhook":
+            return {"is_success": False, "detail": f"NOT_YET_SUPPORTED: messaging provider '{provider}'", "result_type": "not_yet_supported"}
+        webhook_ref = str(messaging.get("slack_webhook_secret_ref", "")).strip()
+        if not webhook_ref.startswith("secret://local/"):
+            return {"is_success": False, "detail": "Missing Slack webhook secret reference.", "result_type": "missing_auth"}
+        secret = self._secret_store.get_secret(webhook_ref.removeprefix("secret://local/"))
+        if secret is None:
+            return {"is_success": False, "detail": "Slack webhook secret was not found.", "result_type": "missing_auth"}
+        try:
+            payload = {"text": intent.body}
+            request = urllib.request.Request(
+                secret.secret_value,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
+                _ = response.read(1024)
+            return {"is_success": True, "detail": "Message sent via Slack webhook.", "result_type": "sent"}
+        except urllib.error.URLError as exc:
+            return {"is_success": False, "detail": f"Message send failed: {exc.reason}", "result_type": "send_failed"}
+        except Exception as exc:  # noqa: BLE001
+            return {"is_success": False, "detail": f"Message send failed: {exc}", "result_type": "send_failed"}
 
     @staticmethod
     def _should_run_windows_enumeration_task(task_title: str) -> bool:

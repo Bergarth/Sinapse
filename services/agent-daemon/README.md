@@ -58,3 +58,7 @@ AGENT_DAEMON_HOST=127.0.0.1 AGENT_DAEMON_PORT=50055 agent-daemon
   - launch-or-attach flow for REW,
   - import of FRD/ZMA files from attached workspace (including controlled zip extraction to a staging path),
   - explicit typed `not_yet_supported` export result (no fake export automation).
+- Browser workflows now include controlled session tasks with explicit navigation/read/download/upload paths, with typed `NOT_YET_SUPPORTED` responses for unsupported interactive actions.
+- Communications workflows now include:
+  - Email draft + review artifacts + approval-gated SMTP send path (workspace attachments supported).
+  - Messaging draft + review artifacts + approval-gated Slack webhook send path.
