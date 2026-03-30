@@ -78,6 +78,23 @@ class AppSettingRecord:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class ApprovalRecord:
+    approval_id: str
+    task_id: str
+    step_id: str
+    risk_class: str
+    action_title: str
+    action_target: str
+    reason: str
+    status: str
+    requested_by: str
+    requested_at: str
+    decided_by: str = ""
+    note: str = ""
+    decided_at: str = ""
+
+
 class MemoryService:
     """Persistence service backed by SQLite and memory-store migrations."""
 
@@ -554,3 +571,50 @@ class MemoryService:
             connection.commit()
 
         return setting
+
+    def upsert_approval(self, approval: ApprovalRecord) -> ApprovalRecord:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO approvals (
+                    approval_id,
+                    task_id,
+                    step_id,
+                    risk_class,
+                    action_title,
+                    action_target,
+                    reason,
+                    status,
+                    requested_by,
+                    decided_by,
+                    note,
+                    requested_at,
+                    decided_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(approval_id)
+                DO UPDATE SET
+                  status = excluded.status,
+                  decided_by = excluded.decided_by,
+                  note = excluded.note,
+                  decided_at = excluded.decided_at
+                """,
+                (
+                    approval.approval_id,
+                    approval.task_id,
+                    approval.step_id,
+                    approval.risk_class,
+                    approval.action_title,
+                    approval.action_target,
+                    approval.reason,
+                    approval.status,
+                    approval.requested_by,
+                    approval.decided_by,
+                    approval.note,
+                    approval.requested_at,
+                    approval.decided_at,
+                ),
+            )
+            connection.commit()
+
+        return approval

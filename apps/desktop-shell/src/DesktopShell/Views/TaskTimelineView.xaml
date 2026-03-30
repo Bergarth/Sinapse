@@ -16,8 +16,37 @@
                 HorizontalAlignment="Left"
                 IsEnabled="{x:Bind ViewModel.CanStartTask, Mode=OneWay}"
                 Click="StartTask_Click" />
+            <Button
+                Content="Run risky placeholder task (approval demo)"
+                HorizontalAlignment="Left"
+                IsEnabled="{x:Bind ViewModel.CanStartTask, Mode=OneWay}"
+                Click="StartRiskyTask_Click" />
 
             <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" TextWrapping="Wrap" />
+
+            <Border
+                BorderBrush="#CC8B0000"
+                BorderThickness="2"
+                CornerRadius="8"
+                Padding="12"
+                Background="#11FF0000"
+                x:Load="{x:Bind ViewModel.HasPendingApproval, Mode=OneWay}">
+                <StackPanel Spacing="8">
+                    <TextBlock FontSize="17" FontWeight="Bold" Text="Approval needed before this task can continue" />
+                    <TextBlock
+                        Text="Please review this action carefully. Nothing will run until you choose Approve, Deny, or Cancel task."
+                        TextWrapping="Wrap" />
+                    <TextBlock FontWeight="SemiBold" Text="{x:Bind ViewModel.PendingApprovalActionSummary, Mode=OneWay}" TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.PendingApprovalReason, Mode=OneWay}" TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.PendingApprovalTarget, Mode=OneWay, StringFormat='Target: {0}'}" TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.PendingApprovalRiskClass, Mode=OneWay, StringFormat='Risk class: {0}'}" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Approve and continue" Click="Approve_Click" IsEnabled="{x:Bind ViewModel.CanRespondToApproval, Mode=OneWay}" />
+                        <Button Content="Deny action" Click="Deny_Click" IsEnabled="{x:Bind ViewModel.CanRespondToApproval, Mode=OneWay}" />
+                        <Button Content="Cancel task" Click="CancelTask_Click" IsEnabled="{x:Bind ViewModel.CanRespondToApproval, Mode=OneWay}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
 
             <Border BorderBrush="LightGray" BorderThickness="1" CornerRadius="6" Padding="8" MinHeight="120">
                 <ItemsRepeater ItemsSource="{x:Bind ViewModel.TimelineEntries, Mode=OneWay}">

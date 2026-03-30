@@ -308,6 +308,71 @@ public sealed class DaemonConnectionService
         }
     }
 
+    public async Task<ApproveStepResult> ApproveStepAsync(
+        string taskId,
+        string stepId,
+        bool approve,
+        string note,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            var response = await client.ApproveStepAsync(
+                new ApproveStepRequest
+                {
+                    TaskId = taskId,
+                    StepId = stepId,
+                    ApprovedBy = "desktop-shell",
+                    Note = approve ? note : $"deny: {note}",
+                    ApprovedAt = DateTimeOffset.UtcNow.ToString("O"),
+                },
+                cancellationToken: cancellationToken);
+
+            return new ApproveStepResult(true, response.TaskId, response.StepId, response.ApprovalStatus, null);
+        }
+        catch (RpcException ex)
+        {
+            return new ApproveStepResult(false, taskId, stepId, ApprovalStatus.Unspecified, $"Daemon error: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new ApproveStepResult(false, taskId, stepId, ApprovalStatus.Unspecified, ex.Message);
+        }
+    }
+
+    public async Task<CancelTaskResult> CancelTaskAsync(
+        string taskId,
+        string reason,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            var response = await client.CancelTaskAsync(
+                new CancelTaskRequest
+                {
+                    TaskId = taskId,
+                    Reason = reason,
+                    CanceledBy = "desktop-shell",
+                    CanceledAt = DateTimeOffset.UtcNow.ToString("O"),
+                },
+                cancellationToken: cancellationToken);
+
+            return new CancelTaskResult(true, response.Task, null);
+        }
+        catch (RpcException ex)
+        {
+            return new CancelTaskResult(false, null, $"Daemon error: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new CancelTaskResult(false, null, ex.Message);
+        }
+    }
+
     public Task BeginSystemStateObservationAsync(
         Action<SystemStateEvent> onEvent,
         CancellationToken cancellationToken = default)
@@ -389,6 +454,18 @@ public sealed record GetConversationResult(
     string? ErrorMessage);
 
 public sealed record StartTaskResult(
+    bool IsSuccess,
+    TaskSummaryDto? Task,
+    string? ErrorMessage);
+
+public sealed record ApproveStepResult(
+    bool IsSuccess,
+    string TaskId,
+    string StepId,
+    ApprovalStatus ApprovalStatus,
+    string? ErrorMessage);
+
+public sealed record CancelTaskResult(
     bool IsSuccess,
     TaskSummaryDto? Task,
     string? ErrorMessage);
