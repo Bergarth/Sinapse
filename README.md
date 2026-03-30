@@ -18,6 +18,7 @@ Implemented today:
 - Shared contract-driven daemon API (`HealthCheck`, conversations/messages, tasks, approvals, workspace root attachment, artifact listing, system stream).
 - SQLite-backed persistence for conversations, messages, tasks, steps, workspace roots/files, app settings, approvals, and artifacts.
 - Real read-only task handlers for browser open-url and Windows window enumeration.
+- Real approval-gated Windows operator task handlers for safe write actions (launch app, focus window, open file, type text).
 - Approval-gate persistence with restart recovery for pending approvals.
 - Local secure API-key storage integration using Windows DPAPI-backed secret references.
 

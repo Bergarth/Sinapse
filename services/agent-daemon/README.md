@@ -46,3 +46,8 @@ AGENT_DAEMON_HOST=127.0.0.1 AGENT_DAEMON_PORT=50055 agent-daemon
 
 - Contract Python stubs are generated at runtime from the shared proto using `grpc_tools.protoc`, so `packages/contracts` remains the source of truth.
 - Generic/unmatched tasks now return explicit `NOT_YET_SUPPORTED` task results (with persisted artifacts) instead of fake placeholder progress.
+- Windows operator task handlers now support approval-gated write-capable actions:
+  - `Open Notepad` / `Launch <app>`
+  - `Focus <window>`
+  - `Open file <path>`
+  - `Type this into the selected field: <text>`

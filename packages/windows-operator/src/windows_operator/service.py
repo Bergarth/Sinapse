@@ -1,15 +1,20 @@
 """Windows operator service.
 
-Current scope intentionally stays read-only and safe:
-- enumerate visible top-level windows
+Current scope intentionally stays safety-scoped:
+- enumerate visible top-level windows (read-only)
+- launch applications by app name or executable path
+- focus an existing window
+- open a local file with its default app
+- type text into the focused target (or a matched window)
 
-Mutating actions are still placeholders.
+Destructive and arbitrary command execution capabilities are intentionally out of scope.
 """
 
 from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,7 +33,7 @@ class OperatorActionResult:
 
     is_success: bool
     detail: str
-    payload: list[dict[str, Any]] | None = None
+    payload: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -57,7 +62,10 @@ class WindowsOperatorService:
 
         return OperatorAvailability(
             is_available=True,
-            detail="Windows operator is available for read-only window enumeration.",
+            detail=(
+                "Windows operator is available for safe actions: enumerate windows, launch app, "
+                "focus window, open file, and type text."
+            ),
         )
 
     def enumerate_open_windows(self) -> OperatorActionResult:
@@ -122,9 +130,92 @@ class WindowsOperatorService:
         _ = window_ref
         return OperatorActionResult(False, "Not implemented yet: observe_window", payload=None)
 
+    def launch_application(self, *, app_name: str | None = None, executable_path: str | None = None) -> OperatorActionResult:
+        if os.name != "nt":
+            return OperatorActionResult(False, "This action requires Windows.", payload=None)
+
+        requested = (executable_path or app_name or "").strip()
+        if not requested:
+            return OperatorActionResult(False, "Please provide an app name or executable path.", payload=None)
+
+        try:
+            if executable_path and executable_path.strip():
+                os.startfile(executable_path.strip())  # type: ignore[attr-defined]
+                launched_target = executable_path.strip()
+            else:
+                subprocess.Popen(requested, shell=False)  # noqa: S603
+                launched_target = requested
+        except Exception as exc:  # noqa: BLE001
+            return OperatorActionResult(False, f"Could not launch application: {exc}", payload=None)
+
+        return OperatorActionResult(
+            True,
+            f"Launched application: {launched_target}",
+            payload={"launched": launched_target},
+        )
+
     def focus_window(self, *, window_ref: str) -> OperatorActionResult:
-        _ = window_ref
-        return OperatorActionResult(False, "Read-only mode: focus_window is disabled.", payload=None)
+        if os.name != "nt":
+            return OperatorActionResult(False, "This action requires Windows.", payload=None)
+        requested = window_ref.strip()
+        if not requested:
+            return OperatorActionResult(False, "Please provide a window title or process hint.", payload=None)
+
+        matched = self._find_window_handle(requested)
+        if matched is None:
+            return OperatorActionResult(False, f"No visible window matched '{requested}'.", payload=None)
+
+        hwnd, title = matched
+        user32 = ctypes.windll.user32
+        user32.ShowWindow(hwnd, 5)  # SW_SHOW
+        if not user32.SetForegroundWindow(hwnd):
+            return OperatorActionResult(False, f"Found '{title}', but could not focus it.", payload=None)
+
+        return OperatorActionResult(
+            True,
+            f"Focused window: {title}",
+            payload={"window_id": int(hwnd), "title": title},
+        )
+
+    def open_file(self, *, file_path: str) -> OperatorActionResult:
+        if os.name != "nt":
+            return OperatorActionResult(False, "This action requires Windows.", payload=None)
+        requested = file_path.strip().strip('"')
+        if not requested:
+            return OperatorActionResult(False, "Please provide a file path.", payload=None)
+        if not os.path.isfile(requested):
+            return OperatorActionResult(False, f"File not found: {requested}", payload=None)
+
+        try:
+            os.startfile(requested)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            return OperatorActionResult(False, f"Could not open file: {exc}", payload=None)
+
+        return OperatorActionResult(True, f"Opened file: {requested}", payload={"file_path": requested})
+
+    def type_text(self, *, target: str, text: str) -> OperatorActionResult:
+        if os.name != "nt":
+            return OperatorActionResult(False, "This action requires Windows.", payload=None)
+        normalized_target = target.strip().lower()
+        content = text
+        if not content:
+            return OperatorActionResult(False, "Please provide text to type.", payload=None)
+
+        if normalized_target not in {"focused", "focused field", "active", "current"}:
+            focused = self.focus_window(window_ref=target)
+            if not focused.is_success:
+                return OperatorActionResult(False, focused.detail, payload=None)
+
+        try:
+            self._send_unicode_text(content)
+        except Exception as exc:  # noqa: BLE001
+            return OperatorActionResult(False, f"Could not type text: {exc}", payload=None)
+
+        return OperatorActionResult(
+            True,
+            "Typed text into the active target.",
+            payload={"target": target, "typed_length": len(content)},
+        )
 
     def invoke_control(self, *, window_ref: str, control_ref: str, action: str) -> OperatorActionResult:
         _ = (window_ref, control_ref, action)
@@ -141,3 +232,46 @@ class WindowsOperatorService:
     def capture_region(self, *, window_ref: str, region: str) -> OperatorActionResult:
         _ = (window_ref, region)
         return OperatorActionResult(False, "Not implemented yet: capture_region", payload=None)
+
+    def _find_window_handle(self, requested: str) -> tuple[int, str] | None:
+        requested_lower = requested.lower()
+        windows = self.enumerate_open_windows().payload or []
+        for window in windows:
+            title = str(window.get("title", ""))
+            class_name = str(window.get("class_name", ""))
+            if requested_lower in title.lower() or requested_lower in class_name.lower():
+                return int(window["window_id"]), title
+        return None
+
+    @staticmethod
+    def _send_unicode_text(text: str) -> None:
+        KEYEVENTF_UNICODE = 0x0004
+        KEYEVENTF_KEYUP = 0x0002
+        INPUT_KEYBOARD = 1
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", ctypes.c_ushort),
+                ("wScan", ctypes.c_ushort),
+                ("dwFlags", ctypes.c_uint),
+                ("time", ctypes.c_uint),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class INPUT(ctypes.Structure):
+            class _INPUT(ctypes.Union):
+                _fields_ = [("ki", KEYBDINPUT)]
+
+            _anonymous_ = ("i",)
+            _fields_ = [("type", ctypes.c_uint), ("i", _INPUT)]
+
+        user32 = ctypes.windll.user32
+        for char in text:
+            scan_code = ord(char)
+            key_down = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, scan_code, KEYEVENTF_UNICODE, 0, None))
+            key_up = INPUT(
+                type=INPUT_KEYBOARD,
+                ki=KEYBDINPUT(0, scan_code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, None),
+            )
+            user32.SendInput(1, ctypes.byref(key_down), ctypes.sizeof(INPUT))
+            user32.SendInput(1, ctypes.byref(key_up), ctypes.sizeof(INPUT))

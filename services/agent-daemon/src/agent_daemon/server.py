@@ -55,6 +55,14 @@ class ActionRisk:
     reason: str
 
 
+@dataclass(frozen=True)
+class OperatorTaskIntent:
+    action_name: str
+    step_title: str
+    action_target: str
+    parameters: dict[str, str]
+
+
 @dataclass
 class PendingApproval:
     approval_id: str
@@ -393,7 +401,21 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 action_target=action_target,
                 reason="This action can send data outside of your workspace.",
             )
-        if any(token in normalized for token in ("write", "edit", "modify", "update", "create", "save")):
+        if any(
+            token in normalized
+            for token in (
+                "write",
+                "edit",
+                "modify",
+                "update",
+                "create",
+                "save",
+                "launch",
+                "focus",
+                "open file",
+                "type text",
+            )
+        ):
             return ActionRisk(
                 risk_class="write",
                 action_title=action_title,
@@ -415,6 +437,7 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         return (
             "APPROVAL_REQUIRED\n"
             f"Action: {risk.action_title}\n"
+            f"Changes system/app state: {'yes' if risk.risk_class != 'read' else 'no'}\n"
             f"Why: {risk.reason}\n"
             f"Target: {risk.action_target}\n"
             f"Risk class: {risk.risk_class}"
@@ -1530,6 +1553,11 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         if task is None:
             return
 
+        operator_intent = self._parse_operator_task_intent(task.title)
+        if operator_intent is not None:
+            self._run_windows_operator_action_task(task, operator_intent=operator_intent, require_approval=require_approval)
+            return
+
         if self._should_run_browser_open_task(task.title):
             self._run_browser_open_task(task)
             return
@@ -1611,7 +1639,8 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         step_id = f"{task_id}-step-not-supported"
         detail = (
             "NOT_YET_SUPPORTED: This task does not match an implemented handler yet. "
-            "Try a task that enumerates windows or opens a URL."
+            "Try one of these: “Open Notepad”, “Focus Chrome”, “Open file C:\\\\notes\\\\todo.txt”, "
+            "or “Type this into the selected field: hello”."
         )
         self._memory.upsert_task_step(
             TaskStepRecord(
@@ -1659,6 +1688,292 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             title=task.title,
             detail=detail,
         )
+
+    @staticmethod
+    def _parse_operator_task_intent(task_title: str) -> OperatorTaskIntent | None:
+        normalized = task_title.strip()
+        lowered = normalized.lower()
+
+        launch_match = re.match(r"^(open|launch|start)\s+(.+)$", normalized, flags=re.IGNORECASE)
+        if launch_match and "http" not in lowered and "file " not in lowered:
+            app_value = launch_match.group(2).strip().strip('"')
+            if app_value:
+                return OperatorTaskIntent(
+                    action_name="launch_application",
+                    step_title="Launch Windows application",
+                    action_target=app_value,
+                    parameters={"app_name": app_value},
+                )
+
+        focus_match = re.match(r"^focus\s+(.+)$", normalized, flags=re.IGNORECASE)
+        if focus_match:
+            window_ref = focus_match.group(1).strip().strip('"')
+            if window_ref:
+                return OperatorTaskIntent(
+                    action_name="focus_window",
+                    step_title="Focus existing window",
+                    action_target=window_ref,
+                    parameters={"window_ref": window_ref},
+                )
+
+        open_file_match = re.match(r"^(open\s+(this\s+)?file|open file)\s+(.+)$", normalized, flags=re.IGNORECASE)
+        if open_file_match:
+            file_path = open_file_match.group(3).strip().strip('"')
+            if file_path:
+                return OperatorTaskIntent(
+                    action_name="open_file",
+                    step_title="Open local file",
+                    action_target=file_path,
+                    parameters={"file_path": file_path},
+                )
+
+        type_match = re.match(
+            r"^type(?:\s+this)?(?:\s+into\s+(.+?))?\s*:\s*(.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if type_match:
+            target = (type_match.group(1) or "focused field").strip().strip('"')
+            text = type_match.group(2).strip()
+            if text:
+                return OperatorTaskIntent(
+                    action_name="type_text",
+                    step_title="Type text into selected target",
+                    action_target=target,
+                    parameters={"target": target, "text": text},
+                )
+
+        return None
+
+    def _run_windows_operator_action_task(
+        self,
+        task: TaskRecord,
+        *,
+        operator_intent: OperatorTaskIntent,
+        require_approval: bool,
+    ) -> None:
+        task_id = task.task_id
+        action_step_id = f"{task_id}-step-operator-1"
+
+        if require_approval:
+            approval_step_id = f"{task_id}-approval-{operator_intent.action_name.replace('_', '-')}"
+            approved, approval_note = self._request_step_approval(
+                task=task,
+                step_id=approval_step_id,
+                step_title=operator_intent.step_title,
+                action_target=operator_intent.action_target,
+                requested_by="daemon",
+            )
+            if not approved:
+                canceled_at = self._now()
+                self._memory.upsert_task(
+                    TaskRecord(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        task_status=pb2.TASK_STATUS_CANCELED,
+                        approval_status=pb2.APPROVAL_STATUS_REJECTED,
+                        title=task.title,
+                        created_at=task.created_at,
+                        updated_at=canceled_at,
+                    )
+                )
+                self._publish_task_event(
+                    task_id=task_id,
+                    step_id=approval_step_id,
+                    event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                    task_status=pb2.TASK_STATUS_CANCELED,
+                    title="Task canceled after approval denial",
+                    detail=approval_note or "Denied by user before operator action.",
+                )
+                return
+
+            resumed_task = self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_RUNNING,
+                    approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=self._now(),
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                step_id=approval_step_id,
+                event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
+                task_status=resumed_task.task_status,
+                title="Approval gate passed",
+                detail=approval_note,
+            )
+
+        started_at = self._now()
+        self._memory.upsert_task_step(
+            TaskStepRecord(
+                step_id=action_step_id,
+                task_id=task_id,
+                sequence_number=1,
+                title=operator_intent.step_title,
+                status="running",
+                detail=f"Running {operator_intent.action_name}...",
+                created_at=started_at,
+                updated_at=started_at,
+            )
+        )
+        self._publish_task_event(
+            task_id=task_id,
+            step_id=action_step_id,
+            event_type=pb2.TASK_EVENT_TYPE_STEP_STARTED,
+            task_status=pb2.TASK_STATUS_RUNNING,
+            title=operator_intent.step_title,
+            detail=f"Step started: {operator_intent.action_name}",
+        )
+
+        try:
+            result = self._execute_windows_operator_intent(operator_intent)
+            finished_at = self._now()
+            if not result.is_success:
+                friendly_error = f"I couldn't complete that action: {result.detail}"
+                self._memory.upsert_task_step(
+                    TaskStepRecord(
+                        step_id=action_step_id,
+                        task_id=task_id,
+                        sequence_number=1,
+                        title=operator_intent.step_title,
+                        status="failed",
+                        detail=friendly_error,
+                        created_at=started_at,
+                        updated_at=finished_at,
+                    )
+                )
+                self._memory.upsert_task(
+                    TaskRecord(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        task_status=pb2.TASK_STATUS_FAILED,
+                        approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                        title=task.title,
+                        created_at=task.created_at,
+                        updated_at=finished_at,
+                    )
+                )
+                self._publish_task_event(
+                    task_id=task_id,
+                    step_id=action_step_id,
+                    event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                    task_status=pb2.TASK_STATUS_FAILED,
+                    title=task.title,
+                    detail=friendly_error,
+                )
+                return
+
+            summary = (
+                f"Action: {operator_intent.action_name}\n"
+                f"Target: {operator_intent.action_target}\n"
+                f"Result: {result.detail}\n"
+                "Changes system/app state: yes"
+            )
+            self._memory.upsert_task_step(
+                TaskStepRecord(
+                    step_id=action_step_id,
+                    task_id=task_id,
+                    sequence_number=1,
+                    title=operator_intent.step_title,
+                    status="completed",
+                    detail=summary,
+                    created_at=started_at,
+                    updated_at=finished_at,
+                )
+            )
+            self._persist_artifact(
+                task_id=task_id,
+                name=f"{operator_intent.action_name}-summary.txt",
+                mime_type="text/plain",
+                payload=summary.encode("utf-8"),
+                labels={"handler": "windows_operator_action", "action": operator_intent.action_name},
+            )
+            self._persist_artifact(
+                task_id=task_id,
+                name=f"{operator_intent.action_name}-result.json",
+                mime_type="application/json",
+                payload=json.dumps(
+                    {
+                        "task_id": task_id,
+                        "action": operator_intent.action_name,
+                        "target": operator_intent.action_target,
+                        "parameters": operator_intent.parameters,
+                        "detail": result.detail,
+                        "payload": result.payload,
+                        "finished_at": finished_at,
+                    },
+                    indent=2,
+                ).encode("utf-8"),
+                labels={"kind": "operator_result", "action": operator_intent.action_name},
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                step_id=action_step_id,
+                event_type=pb2.TASK_EVENT_TYPE_STEP_FINISHED,
+                task_status=pb2.TASK_STATUS_RUNNING,
+                title=operator_intent.step_title,
+                detail=result.detail,
+            )
+
+            completed_task = self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_COMPLETED,
+                    approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=finished_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FINISHED,
+                task_status=completed_task.task_status,
+                title=completed_task.title,
+                detail="Operator action task finished.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            failed_at = self._now()
+            self._memory.upsert_task(
+                TaskRecord(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    task_status=pb2.TASK_STATUS_FAILED,
+                    approval_status=pb2.APPROVAL_STATUS_APPROVED,
+                    title=task.title,
+                    created_at=task.created_at,
+                    updated_at=failed_at,
+                )
+            )
+            self._publish_task_event(
+                task_id=task_id,
+                event_type=pb2.TASK_EVENT_TYPE_TASK_FAILED,
+                task_status=pb2.TASK_STATUS_FAILED,
+                title=task.title,
+                detail=f"I ran into an unexpected error while executing this action: {exc}",
+            )
+
+    def _execute_windows_operator_intent(self, operator_intent: OperatorTaskIntent):
+        if operator_intent.action_name == "launch_application":
+            return self._windows_operator.launch_application(
+                app_name=operator_intent.parameters.get("app_name"),
+                executable_path=operator_intent.parameters.get("executable_path"),
+            )
+        if operator_intent.action_name == "focus_window":
+            return self._windows_operator.focus_window(window_ref=operator_intent.parameters["window_ref"])
+        if operator_intent.action_name == "open_file":
+            return self._windows_operator.open_file(file_path=operator_intent.parameters["file_path"])
+        if operator_intent.action_name == "type_text":
+            return self._windows_operator.type_text(
+                target=operator_intent.parameters["target"],
+                text=operator_intent.parameters["text"],
+            )
+        raise ValueError(f"Unsupported operator action: {operator_intent.action_name}")
 
     @staticmethod
     def _should_run_browser_open_task(task_title: str) -> bool:

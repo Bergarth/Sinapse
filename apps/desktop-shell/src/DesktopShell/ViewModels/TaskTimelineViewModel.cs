@@ -36,7 +36,7 @@ public class TaskTimelineViewModel : INotifyPropertyChanged
     private ApprovalPromptViewModel? _pendingApproval;
     private bool _isStartingTask;
     private bool _isSubmittingApproval;
-    private string _statusText = "Run a read-only browser task to open a URL and summarize the page.";
+    private string _statusText = "Try: Open Notepad, Focus Chrome, Open this file, or Type this into the selected field.";
 
     public TaskTimelineViewModel(DaemonConnectionService daemonConnectionService, DispatcherQueue dispatcherQueue)
     {
@@ -125,12 +125,12 @@ public class TaskTimelineViewModel : INotifyPropertyChanged
 
         IsStartingTask = true;
         StatusText = "Starting task...";
-        var taskTitle = $"Open https://example.com and summarize it (read-only) {DateTimeOffset.Now:HH:mm:ss}";
+        var taskTitle = "Open Notepad";
         var result = await _daemonConnectionService.StartTaskAsync(_conversationId, taskTitle, cancellationToken);
         IsStartingTask = false;
 
         StatusText = result.IsSuccess
-            ? "Task started. Timeline updates will appear below."
+            ? "Task started. Approve the action card to continue."
             : (result.ErrorMessage ?? "Failed to start task.");
     }
 
@@ -143,13 +143,13 @@ public class TaskTimelineViewModel : INotifyPropertyChanged
         }
 
         IsStartingTask = true;
-        StatusText = "Starting risky placeholder task...";
-        var taskTitle = $"Write a summary to report.txt and send it to review@example.com {DateTimeOffset.Now:HH:mm:ss}";
+        StatusText = "Starting typing task...";
+        var taskTitle = "Type this into the selected field: hello from Sinapse";
         var result = await _daemonConnectionService.StartTaskAsync(_conversationId, taskTitle, cancellationToken);
         IsStartingTask = false;
         StatusText = result.IsSuccess
-            ? "Risky demo task started. It should pause for approval."
-            : (result.ErrorMessage ?? "Failed to start risky task.");
+            ? "Typing task started. It will pause for approval first."
+            : (result.ErrorMessage ?? "Failed to start typing task.");
     }
 
     public async Task ApprovePendingStepAsync(CancellationToken cancellationToken = default)

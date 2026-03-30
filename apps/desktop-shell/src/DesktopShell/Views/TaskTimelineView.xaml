@@ -10,14 +10,14 @@
     <Border Padding="16" BorderBrush="Gray" BorderThickness="1" CornerRadius="8" Margin="12">
         <StackPanel Spacing="10">
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="Task Timeline" />
-            <TextBlock Text="Run a read-only browser task to open a URL and extract visible content." TextWrapping="Wrap" />
+            <TextBlock Text="Safe desktop actions now available (approval-gated): Open Notepad, Focus Chrome, Open this file, Type this into the selected field." TextWrapping="Wrap" />
             <Button
-                Content="Open example.com (read-only)"
+                Content="Open Notepad (approval-gated)"
                 HorizontalAlignment="Left"
                 IsEnabled="{x:Bind ViewModel.CanStartTask, Mode=OneWay}"
                 Click="StartTask_Click" />
             <Button
-                Content="Run risky placeholder task (approval demo)"
+                Content="Type hello into selected field"
                 HorizontalAlignment="Left"
                 IsEnabled="{x:Bind ViewModel.CanStartTask, Mode=OneWay}"
                 Click="StartRiskyTask_Click" />

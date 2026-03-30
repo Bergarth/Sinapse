@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -23,6 +25,27 @@ class _DummyWindowsOperator:
 
     def enumerate_open_windows(self):
         return type("Result", (), {"is_success": True, "detail": "ok", "payload": []})()
+
+    def launch_application(self, *, app_name: str | None = None, executable_path: str | None = None):
+        launched = executable_path or app_name or "unknown"
+        return type(
+            "Result",
+            (),
+            {"is_success": True, "detail": f"Launched application: {launched}", "payload": {"launched": launched}},
+        )()
+
+    def focus_window(self, *, window_ref: str):
+        return type("Result", (), {"is_success": True, "detail": f"Focused {window_ref}", "payload": {"window": window_ref}})()
+
+    def open_file(self, *, file_path: str):
+        return type("Result", (), {"is_success": True, "detail": f"Opened {file_path}", "payload": {"file": file_path}})()
+
+    def type_text(self, *, target: str, text: str):
+        return type(
+            "Result",
+            (),
+            {"is_success": True, "detail": f"Typed {len(text)} chars into {target}", "payload": {"target": target}},
+        )()
 
 
 class _DummyBrowserOperator:
@@ -158,6 +181,58 @@ class HardeningTests(unittest.TestCase):
             self.service.UpdateAppSettings(pb2.UpdateAppSettingsRequest(settings=settings), _FakeContext())
 
         self.assertIn(str(grpc.StatusCode.INVALID_ARGUMENT), str(ex.exception))
+
+    def test_operator_write_action_requires_approval_then_persists_artifacts(self) -> None:
+        self.memory.upsert_conversation(
+            ConversationRecord("conv-operator", "Operator", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        )
+        task = self.memory.upsert_task(
+            TaskRecord(
+                task_id="task-open-notepad",
+                conversation_id="conv-operator",
+                task_status=pb2.TASK_STATUS_RUNNING,
+                approval_status=pb2.APPROVAL_STATUS_PENDING,
+                title="Open Notepad",
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:00:00Z",
+            )
+        )
+
+        worker = threading.Thread(target=self.service._run_task, args=(task.task_id, True), daemon=True)  # noqa: SLF001
+        worker.start()
+
+        pending = []
+        for _ in range(20):
+            pending = self.memory.list_pending_approvals()
+            if pending:
+                break
+            time.sleep(0.01)
+        self.assertEqual(1, len(pending))
+        self.assertIn("launch", pending[0].action_title.lower())
+
+        self.service.ApproveStep(
+            pb2.ApproveStepRequest(
+                task_id=task.task_id,
+                step_id=pending[0].step_id,
+                approved_by="tests",
+                note="approved",
+            ),
+            _FakeContext(),
+        )
+        worker.join(timeout=2)
+
+        completed = None
+        for _ in range(50):
+            completed = self.memory.get_task(task.task_id)
+            if completed is not None and completed.task_status == pb2.TASK_STATUS_COMPLETED:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(completed)
+        self.assertEqual(pb2.TASK_STATUS_COMPLETED, completed.task_status)
+        artifacts = self.service.ListArtifacts(pb2.ListArtifactsRequest(task_id=task.task_id), _FakeContext())
+        names = {item.name for item in artifacts.artifacts}
+        self.assertIn("launch_application-summary.txt", names)
+        self.assertIn("launch_application-result.json", names)
 
 
 if __name__ == "__main__":
