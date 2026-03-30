@@ -36,7 +36,7 @@ class CorrelationIdInterceptor(grpc.ServerInterceptor):
                         "peer": context.peer(),
                     },
                 )
-                context.set_trailing_metadata(("x-correlation-id", correlation_id))
+                context.set_trailing_metadata((("x-correlation-id", correlation_id),))
                 return behavior(request, context)
 
             return inner
@@ -51,7 +51,7 @@ class CorrelationIdInterceptor(grpc.ServerInterceptor):
                         "peer": context.peer(),
                     },
                 )
-                context.set_trailing_metadata(("x-correlation-id", correlation_id))
+                context.set_trailing_metadata((("x-correlation-id", correlation_id),))
                 yield from behavior(request, context)
 
             return inner
