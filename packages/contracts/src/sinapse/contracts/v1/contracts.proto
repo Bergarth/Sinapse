@@ -37,6 +37,12 @@ enum MessageRole {
   MESSAGE_ROLE_ASSISTANT = 2;
 }
 
+enum WorkspaceAccessMode {
+  WORKSPACE_ACCESS_MODE_UNSPECIFIED = 0;
+  WORKSPACE_ACCESS_MODE_READ_ONLY = 1;
+  WORKSPACE_ACCESS_MODE_READ_WRITE = 2;
+}
+
 message ArtifactMetadata {
   string artifact_id = 1;
   string task_id = 2;
@@ -114,6 +120,18 @@ message ChatMessageDto {
   string created_at = 5;
 }
 
+message WorkspaceRootDto {
+  string root_id = 1;
+  string conversation_id = 2;
+  string display_name = 3;
+  string root_path = 4;
+  WorkspaceAccessMode access_mode = 5;
+  uint32 file_count = 6;
+  repeated string sample_files = 7;
+  string attached_at = 8;
+  string last_scanned_at = 9;
+}
+
 message HealthCheckRequest {
   string requester = 1;
 }
@@ -149,6 +167,28 @@ message SendUserMessageResponse {
   ConversationDto conversation = 3;
   ChatMessageDto user_message = 4;
   ChatMessageDto assistant_message = 5;
+}
+
+message AttachWorkspaceRootRequest {
+  string conversation_id = 1;
+  string root_path = 2;
+  string display_name = 3;
+  WorkspaceAccessMode access_mode = 4;
+  string requested_by = 5;
+}
+
+message AttachWorkspaceRootResponse {
+  ConversationDto conversation = 1;
+  WorkspaceRootDto root = 2;
+}
+
+message GetConversationWorkspaceRequest {
+  string conversation_id = 1;
+}
+
+message GetConversationWorkspaceResponse {
+  string conversation_id = 1;
+  repeated WorkspaceRootDto roots = 2;
 }
 
 
@@ -241,6 +281,8 @@ service DaemonContract {
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
   rpc StartConversation(StartConversationRequest) returns (StartConversationResponse);
   rpc SendUserMessage(SendUserMessageRequest) returns (SendUserMessageResponse);
+  rpc AttachWorkspaceRoot(AttachWorkspaceRootRequest) returns (AttachWorkspaceRootResponse);
+  rpc GetConversationWorkspace(GetConversationWorkspaceRequest) returns (GetConversationWorkspaceResponse);
   rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
   rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);
   rpc StartTask(StartTaskRequest) returns (StartTaskResponse);
