@@ -88,6 +88,7 @@ public sealed class DaemonConnectionService
                 ConversationId: sendResponse.Conversation.ConversationId,
                 UserMessage: sendResponse.UserMessage,
                 AssistantMessage: sendResponse.AssistantMessage,
+                Conversation: sendResponse.Conversation,
                 ErrorMessage: null);
         }
         catch (RpcException ex)
@@ -97,6 +98,7 @@ public sealed class DaemonConnectionService
                 ConversationId: conversationId,
                 UserMessage: null,
                 AssistantMessage: null,
+                Conversation: null,
                 ErrorMessage: $"Daemon error: {ex.Status.Detail}");
         }
         catch (Exception ex)
@@ -106,7 +108,43 @@ public sealed class DaemonConnectionService
                 ConversationId: conversationId,
                 UserMessage: null,
                 AssistantMessage: null,
+                Conversation: null,
                 ErrorMessage: ex.Message);
+        }
+    }
+
+    public async Task<IReadOnlyList<ConversationDto>> ListConversationsAsync(CancellationToken cancellationToken = default)
+    {
+        using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+        var client = new DaemonContract.DaemonContractClient(channel);
+        var response = await client.ListConversationsAsync(new ListConversationsRequest(), cancellationToken: cancellationToken);
+        return response.Conversations;
+    }
+
+    public async Task<GetConversationResult> GetConversationAsync(string conversationId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+
+            var response = await client.GetConversationAsync(
+                new GetConversationRequest { ConversationId = conversationId },
+                cancellationToken: cancellationToken);
+
+            return new GetConversationResult(
+                IsSuccess: true,
+                Conversation: response.Conversation,
+                Messages: response.Messages,
+                ErrorMessage: null);
+        }
+        catch (RpcException ex)
+        {
+            return new GetConversationResult(false, null, [], $"Daemon error: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new GetConversationResult(false, null, [], ex.Message);
         }
     }
 
@@ -139,4 +177,11 @@ public sealed record SendMessageResult(
     string? ConversationId,
     ChatMessageDto? UserMessage,
     ChatMessageDto? AssistantMessage,
+    ConversationDto? Conversation,
+    string? ErrorMessage);
+
+public sealed record GetConversationResult(
+    bool IsSuccess,
+    ConversationDto? Conversation,
+    IReadOnlyList<ChatMessageDto> Messages,
     string? ErrorMessage);

@@ -1,4 +1,3 @@
-using DesktopShell.Services;
 using DesktopShell.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -11,7 +10,8 @@ public sealed partial class ChatView : UserControl
 
     public ChatView()
     {
-        ViewModel = new ChatViewModel(new DaemonConnectionService());
+        var app = (App)Application.Current;
+        ViewModel = app.ChatViewModel;
         InitializeComponent();
     }
 
@@ -19,5 +19,8 @@ public sealed partial class ChatView : UserControl
     {
         _ = sender;
         await ViewModel.SendMessageAsync();
+
+        var app = (App)Application.Current;
+        await app.SidebarViewModel.RefreshConversationsAsync();
     }
 }

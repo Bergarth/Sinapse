@@ -47,6 +47,8 @@ public class ChatViewModel : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    public event EventHandler<string>? ConversationChanged;
+
     public string WorkspaceAttachmentTitle { get; } = "Attach folders to this conversation";
 
     public string WorkspaceAttachmentHelpText { get; } = "Add one or more folders to help the assistant understand your project context. You can start with a single folder and add more later.";
@@ -121,7 +123,7 @@ public class ChatViewModel : INotifyPropertyChanged
         IsSending = false;
         OnPropertyChanged(nameof(CanSendMessage));
 
-        if (!result.IsSuccess || result.UserMessage is null || result.AssistantMessage is null)
+        if (!result.IsSuccess || result.UserMessage is null || result.AssistantMessage is null || result.Conversation is null)
         {
             StatusText = result.ErrorMessage ?? "Failed to send message to daemon.";
             return;
@@ -133,7 +135,34 @@ public class ChatViewModel : INotifyPropertyChanged
         Messages.Add(MapMessage(result.UserMessage));
         Messages.Add(MapMessage(result.AssistantMessage));
 
-        StatusText = "Message round-trip completed.";
+        ConversationChanged?.Invoke(this, result.Conversation.ConversationId);
+        StatusText = "Message round-trip completed and persisted.";
+    }
+
+    public async Task LoadConversationAsync(string conversationId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId))
+        {
+            return;
+        }
+
+        StatusText = "Loading conversation history...";
+        var result = await _daemonConnectionService.GetConversationAsync(conversationId, cancellationToken);
+        if (!result.IsSuccess || result.Conversation is null)
+        {
+            StatusText = result.ErrorMessage ?? "Failed to load conversation.";
+            return;
+        }
+
+        _conversationId = result.Conversation.ConversationId;
+        Messages.Clear();
+        foreach (var message in result.Messages)
+        {
+            Messages.Add(MapMessage(message));
+        }
+
+        StatusText = $"Loaded conversation '{result.Conversation.Title}' from SQLite.";
+        ConversationChanged?.Invoke(this, _conversationId);
     }
 
     private static ChatMessageViewModel MapMessage(ChatMessageDto message)
