@@ -1,15 +1,15 @@
 # windows-operator
 
-Placeholder operator package for future Windows desktop automation.
+Windows desktop operator package with a safety-scoped first write phase.
 
-Current scope:
-- expose capability availability for daemon startup/status surfaces
-- define stable method contracts for future actions:
-  - `observe_window`
-  - `focus_window`
-  - `invoke_control`
-  - `set_text`
-  - `send_keys`
-  - `capture_region`
+Implemented actions:
+- `enumerate_open_windows()` (read-only)
+- `launch_application(app_name | executable_path)`
+- `focus_window(window_ref)` (title/class hint)
+- `open_file(file_path)` (local files only)
+- `type_text(target, text)` (focused target or focus-by-title then type)
 
-No real automation is implemented yet.
+Safety boundaries:
+- No destructive actions (delete/remove/format/admin mutation).
+- No raw shell command execution endpoint.
+- The daemon is responsible for approval-gating mutating actions before calling these methods.
