@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -18,6 +19,7 @@ from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from agent_daemon.contracts_runtime import load_contract_modules
 from agent_daemon.logging_utils import set_correlation_id
 from agent_daemon.services.memory import (
+    AppSettingRecord,
     ConversationRecord,
     MemoryService,
     MessageRecord,
@@ -95,6 +97,68 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         self._memory = memory_service
         self._event_subscribers: list[queue.Queue] = []
         self._event_subscribers_lock = threading.Lock()
+
+    _APP_SETTINGS_KEY = "model_provider_settings_v1"
+
+    @staticmethod
+    def _default_settings_payload(observed_at: str) -> dict:
+        return {
+            "model_mode": "MODEL_MODE_GUIDED",
+            "provider_preference": "PROVIDER_PREFERENCE_LOCAL_PREFERRED",
+            "providers": [
+                {"provider_id": "local-default", "display_name": "Local Runtime"},
+                {"provider_id": "cloud-default", "display_name": "Cloud Runtime"},
+            ],
+            "api_key_entries": [],
+            "updated_at": observed_at,
+        }
+
+    def _load_app_settings_payload(self) -> dict:
+        stored = self._memory.get_app_setting(self._APP_SETTINGS_KEY)
+        if stored is None:
+            return self._default_settings_payload(self._now())
+
+        try:
+            payload = json.loads(stored.setting_value)
+        except json.JSONDecodeError:
+            return self._default_settings_payload(self._now())
+
+        if not isinstance(payload, dict):
+            return self._default_settings_payload(self._now())
+
+        return payload
+
+    def _to_app_settings_dto(self, payload: dict):
+        providers = payload.get("providers", [])
+        api_key_entries = payload.get("api_key_entries", [])
+        return pb2.AppSettingsDto(
+            model_mode=getattr(pb2, payload.get("model_mode", "MODEL_MODE_GUIDED"), pb2.MODEL_MODE_GUIDED),
+            provider_preference=getattr(
+                pb2,
+                payload.get("provider_preference", "PROVIDER_PREFERENCE_LOCAL_PREFERRED"),
+                pb2.PROVIDER_PREFERENCE_LOCAL_PREFERRED,
+            ),
+            providers=[
+                pb2.ProviderConfigDto(
+                    provider_id=str(provider.get("provider_id", "")).strip(),
+                    display_name=str(provider.get("display_name", "")).strip(),
+                )
+                for provider in providers
+                if isinstance(provider, dict)
+            ],
+            api_key_entries=[
+                pb2.ApiKeyEntryDto(
+                    entry_id=str(entry.get("entry_id", "")).strip(),
+                    provider_id=str(entry.get("provider_id", "")).strip(),
+                    display_name=str(entry.get("display_name", "")).strip(),
+                    placeholder_ref=str(entry.get("placeholder_ref", "")).strip(),
+                    created_at=str(entry.get("created_at", "")).strip(),
+                )
+                for entry in api_key_entries
+                if isinstance(entry, dict)
+            ],
+            updated_at=str(payload.get("updated_at", self._now())),
+        )
 
     def _now(self) -> str:
         return datetime.now(UTC).isoformat()
@@ -263,6 +327,88 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 detail=f"python {os.sys.version.split()[0]}",
             ),
         )
+
+    def GetAppSettings(self, request, context):
+        _ = (request, context)
+        payload = self._load_app_settings_payload()
+        return pb2.GetAppSettingsResponse(settings=self._to_app_settings_dto(payload))
+
+    def UpdateAppSettings(self, request, context):
+        settings = request.settings
+
+        providers = []
+        seen_provider_ids: set[str] = set()
+        for provider in settings.providers:
+            provider_id = provider.provider_id.strip().lower()
+            display_name = provider.display_name.strip()
+
+            if not provider_id:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Each provider needs a provider ID.")
+            if not display_name:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Each provider needs a display name.")
+            if provider_id in seen_provider_ids:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Duplicate provider ID: {provider_id}")
+
+            seen_provider_ids.add(provider_id)
+            providers.append({"provider_id": provider_id, "display_name": display_name})
+
+        entries = []
+        seen_entry_ids: set[str] = set()
+        for entry in settings.api_key_entries:
+            entry_id = entry.entry_id.strip().lower()
+            provider_id = entry.provider_id.strip().lower()
+            display_name = entry.display_name.strip()
+            placeholder_ref = entry.placeholder_ref.strip()
+            created_at = entry.created_at.strip() or self._now()
+
+            if not entry_id:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Each API key entry needs an ID.")
+            if entry_id in seen_entry_ids:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Duplicate API key entry ID: {entry_id}")
+            if provider_id not in seen_provider_ids:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"API key entry {entry_id} references unknown provider {provider_id}.",
+                )
+            if not display_name:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Each API key entry needs a label.")
+            if not placeholder_ref.startswith("placeholder://"):
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    "API key entries are placeholder refs only (must start with placeholder://).",
+                )
+
+            seen_entry_ids.add(entry_id)
+            entries.append(
+                {
+                    "entry_id": entry_id,
+                    "provider_id": provider_id,
+                    "display_name": display_name,
+                    "placeholder_ref": placeholder_ref,
+                    "created_at": created_at,
+                }
+            )
+
+        updated_at = self._now()
+        payload = {
+            "model_mode": pb2.ModelMode.Name(settings.model_mode or pb2.MODEL_MODE_GUIDED),
+            "provider_preference": pb2.ProviderPreference.Name(
+                settings.provider_preference or pb2.PROVIDER_PREFERENCE_LOCAL_PREFERRED
+            ),
+            "providers": providers,
+            "api_key_entries": entries,
+            "updated_at": updated_at,
+        }
+
+        self._memory.upsert_app_setting(
+            AppSettingRecord(
+                setting_key=self._APP_SETTINGS_KEY,
+                setting_value=json.dumps(payload),
+                updated_at=updated_at,
+            )
+        )
+
+        return pb2.UpdateAppSettingsResponse(settings=self._to_app_settings_dto(payload))
 
     def StartConversation(self, request, context):
         _ = context

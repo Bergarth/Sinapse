@@ -50,6 +50,57 @@ public sealed class DaemonConnectionService
         }
     }
 
+
+    public async Task<GetAppSettingsResult> GetAppSettingsAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            var response = await client.GetAppSettingsAsync(
+                new GetAppSettingsRequest { Requester = "desktop-shell" },
+                cancellationToken: cancellationToken);
+
+            return new GetAppSettingsResult(true, response.Settings, null);
+        }
+        catch (RpcException ex)
+        {
+            return new GetAppSettingsResult(false, null, $"Daemon error: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new GetAppSettingsResult(false, null, ex.Message);
+        }
+    }
+
+    public async Task<UpdateAppSettingsResult> UpdateAppSettingsAsync(
+        AppSettingsDto settings,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            var response = await client.UpdateAppSettingsAsync(
+                new UpdateAppSettingsRequest
+                {
+                    Settings = settings,
+                    UpdatedBy = "desktop-shell",
+                },
+                cancellationToken: cancellationToken);
+
+            return new UpdateAppSettingsResult(true, response.Settings, null);
+        }
+        catch (RpcException ex)
+        {
+            return new UpdateAppSettingsResult(false, null, $"Daemon error: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new UpdateAppSettingsResult(false, null, ex.Message);
+        }
+    }
+
     public async Task<SendMessageResult> SendUserMessageAsync(
         string? conversationId,
         string userContent,
@@ -345,4 +396,14 @@ public sealed record GetConversationWorkspaceResult(
     bool IsSuccess,
     string ConversationId,
     IReadOnlyList<WorkspaceRootDto> Roots,
+    string? ErrorMessage);
+
+public sealed record GetAppSettingsResult(
+    bool IsSuccess,
+    AppSettingsDto? Settings,
+    string? ErrorMessage);
+
+public sealed record UpdateAppSettingsResult(
+    bool IsSuccess,
+    AppSettingsDto? Settings,
     string? ErrorMessage);

@@ -4,12 +4,79 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:viewModels="using:DesktopShell.ViewModels"
     mc:Ignorable="d">
 
-    <Border Padding="16" BorderBrush="Gray" BorderThickness="1" CornerRadius="8" Margin="12">
-        <StackPanel Spacing="8">
-            <TextBlock FontSize="20" FontWeight="SemiBold" Text="Settings View" />
-            <TextBlock Text="Placeholder for app settings controls." TextWrapping="Wrap" />
-        </StackPanel>
-    </Border>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Border Padding="16" BorderBrush="Gray" BorderThickness="1" CornerRadius="8" Margin="12">
+            <StackPanel Spacing="12">
+                <TextBlock FontSize="20" FontWeight="SemiBold" Text="Settings" />
+                <TextBlock Text="Pick your default model behavior, provider preference, and placeholder API key references. No real secrets are stored yet." TextWrapping="Wrap" />
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Model mode" FontWeight="SemiBold" />
+                    <ComboBox x:Name="ModelModeComboBox">
+                        <ComboBoxItem Content="Guided (Recommended)" />
+                        <ComboBoxItem Content="Manual" />
+                    </ComboBox>
+                </StackPanel>
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Local vs cloud preference" FontWeight="SemiBold" />
+                    <ComboBox x:Name="PreferenceComboBox">
+                        <ComboBoxItem Content="Local-preferred (Recommended)" />
+                        <ComboBoxItem Content="Cloud-preferred" />
+                    </ComboBox>
+                </StackPanel>
+
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Configured providers" FontWeight="SemiBold" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBox Width="220" PlaceholderText="Provider name (for example: OpenAI)" Text="{x:Bind ViewModel.NewProviderName, Mode=TwoWay}" />
+                        <Button Content="Add provider" Click="AddProvider_Click" />
+                        <Button Content="Remove selected" Click="RemoveProvider_Click" />
+                    </StackPanel>
+                    <ListView x:Name="ProvidersList" ItemsSource="{x:Bind ViewModel.Providers, Mode=OneWay}" SelectionChanged="ProvidersList_SelectionChanged">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="viewModels:ProviderItemViewModel">
+                                <StackPanel Spacing="2" Padding="4">
+                                    <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{x:Bind ProviderId, Mode=OneWay}" Opacity="0.7" FontSize="12" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </StackPanel>
+
+                <StackPanel Spacing="8">
+                    <TextBlock Text="API key placeholders" FontWeight="SemiBold" />
+                    <TextBlock Text="These entries only store placeholder references (placeholder://...). Real secret storage will be integrated later." TextWrapping="Wrap" Opacity="0.8" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <ComboBox x:Name="ProviderForKeyComboBox" Width="180" DisplayMemberPath="DisplayName" SelectedValuePath="ProviderId" SelectedValue="{x:Bind ViewModel.SelectedProviderIdForApiKey, Mode=TwoWay}" ItemsSource="{x:Bind ViewModel.Providers, Mode=OneWay}" />
+                        <TextBox Width="200" PlaceholderText="Placeholder label" Text="{x:Bind ViewModel.NewApiKeyLabel, Mode=TwoWay}" />
+                        <Button Content="Add placeholder" Click="AddApiKeyPlaceholder_Click" />
+                        <Button Content="Remove selected" Click="RemoveApiKeyPlaceholder_Click" />
+                    </StackPanel>
+                    <ListView x:Name="ApiKeysList" ItemsSource="{x:Bind ViewModel.ApiKeyEntries, Mode=OneWay}" SelectionChanged="ApiKeysList_SelectionChanged">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="viewModels:ApiKeyEntryItemViewModel">
+                                <StackPanel Spacing="2" Padding="4">
+                                    <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{x:Bind ProviderId, Mode=OneWay, StringFormat='Provider: {0}'}" FontSize="12" Opacity="0.8" />
+                                    <TextBlock Text="{x:Bind PlaceholderRef, Mode=OneWay}" FontSize="12" Opacity="0.6" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="Reload" Click="Reload_Click" />
+                    <Button Content="Save settings" Click="Save_Click" />
+                </StackPanel>
+
+                <TextBlock Text="{x:Bind ViewModel.StatusMessage, Mode=OneWay}" TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+    </ScrollViewer>
 </UserControl>

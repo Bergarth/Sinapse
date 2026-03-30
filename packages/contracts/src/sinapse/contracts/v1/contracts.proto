@@ -43,6 +43,18 @@ enum WorkspaceAccessMode {
   WORKSPACE_ACCESS_MODE_READ_WRITE = 2;
 }
 
+enum ModelMode {
+  MODEL_MODE_UNSPECIFIED = 0;
+  MODEL_MODE_GUIDED = 1;
+  MODEL_MODE_MANUAL = 2;
+}
+
+enum ProviderPreference {
+  PROVIDER_PREFERENCE_UNSPECIFIED = 0;
+  PROVIDER_PREFERENCE_LOCAL_PREFERRED = 1;
+  PROVIDER_PREFERENCE_CLOUD_PREFERRED = 2;
+}
+
 message ArtifactMetadata {
   string artifact_id = 1;
   string task_id = 2;
@@ -130,6 +142,28 @@ message WorkspaceRootDto {
   repeated string sample_files = 7;
   string attached_at = 8;
   string last_scanned_at = 9;
+}
+
+
+message ProviderConfigDto {
+  string provider_id = 1;
+  string display_name = 2;
+}
+
+message ApiKeyEntryDto {
+  string entry_id = 1;
+  string provider_id = 2;
+  string display_name = 3;
+  string placeholder_ref = 4;
+  string created_at = 5;
+}
+
+message AppSettingsDto {
+  ModelMode model_mode = 1;
+  ProviderPreference provider_preference = 2;
+  repeated ProviderConfigDto providers = 3;
+  repeated ApiKeyEntryDto api_key_entries = 4;
+  string updated_at = 5;
 }
 
 message HealthCheckRequest {
@@ -263,6 +297,24 @@ message ListArtifactsResponse {
   repeated ArtifactMetadata artifacts = 1;
 }
 
+
+message GetAppSettingsRequest {
+  string requester = 1;
+}
+
+message GetAppSettingsResponse {
+  AppSettingsDto settings = 1;
+}
+
+message UpdateAppSettingsRequest {
+  AppSettingsDto settings = 1;
+  string updated_by = 2;
+}
+
+message UpdateAppSettingsResponse {
+  AppSettingsDto settings = 1;
+}
+
 message ObserveSystemStateRequest {
   string workspace_id = 1;
   string since = 2;
@@ -279,6 +331,8 @@ message SystemStateEvent {
 
 service DaemonContract {
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc GetAppSettings(GetAppSettingsRequest) returns (GetAppSettingsResponse);
+  rpc UpdateAppSettings(UpdateAppSettingsRequest) returns (UpdateAppSettingsResponse);
   rpc StartConversation(StartConversationRequest) returns (StartConversationResponse);
   rpc SendUserMessage(SendUserMessageRequest) returns (SendUserMessageResponse);
   rpc AttachWorkspaceRoot(AttachWorkspaceRootRequest) returns (AttachWorkspaceRootResponse);
