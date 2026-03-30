@@ -61,7 +61,7 @@
                 </Grid.RowDefinitions>
 
                 <views:ArtifactPanelView Grid.Row="0" />
-                <views:OnboardingView Grid.Row="1" />
+                <views:SettingsView Grid.Row="1" />
             </Grid>
         </Grid>
     </Grid>

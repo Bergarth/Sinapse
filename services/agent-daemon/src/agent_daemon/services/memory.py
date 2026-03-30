@@ -69,6 +69,13 @@ class WorkspaceFileRecord:
     discovered_at: str
 
 
+@dataclass(frozen=True)
+class AppSettingRecord:
+    setting_key: str
+    setting_value: str
+    updated_at: str
+
+
 class MemoryService:
     """Persistence service backed by SQLite and memory-store migrations."""
 
@@ -499,3 +506,45 @@ class MemoryService:
             )
             for row in rows
         ]
+
+
+    def get_app_setting(self, setting_key: str) -> AppSettingRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT setting_key, setting_value, updated_at
+                FROM app_settings
+                WHERE setting_key = ?
+                """,
+                (setting_key,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return AppSettingRecord(
+            setting_key=str(row["setting_key"]),
+            setting_value=str(row["setting_value"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def upsert_app_setting(self, setting: AppSettingRecord) -> AppSettingRecord:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO app_settings (setting_key, setting_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(setting_key)
+                DO UPDATE SET
+                  setting_value = excluded.setting_value,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    setting.setting_key,
+                    setting.setting_value,
+                    setting.updated_at,
+                ),
+            )
+            connection.commit()
+
+        return setting

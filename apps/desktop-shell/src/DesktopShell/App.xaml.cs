@@ -17,6 +17,7 @@ public partial class App : Application
     public ChatViewModel ChatViewModel { get; private set; } = null!;
 
     public SidebarViewModel SidebarViewModel { get; private set; } = null!;
+    public SettingsViewModel SettingsViewModel { get; private set; } = null!;
     public TaskTimelineViewModel TaskTimelineViewModel { get; private set; } = null!;
     public MainWindow MainWindow { get; private set; } = null!;
 
@@ -26,6 +27,7 @@ public partial class App : Application
 
         ChatViewModel = new ChatViewModel(DaemonConnectionService);
         SidebarViewModel = new SidebarViewModel(DaemonConnectionService);
+        SettingsViewModel = new SettingsViewModel(DaemonConnectionService);
         TaskTimelineViewModel = new TaskTimelineViewModel(
             DaemonConnectionService,
             DispatcherQueue.GetForCurrentThread()!);
