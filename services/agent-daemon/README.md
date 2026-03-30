@@ -51,3 +51,10 @@ AGENT_DAEMON_HOST=127.0.0.1 AGENT_DAEMON_PORT=50055 agent-daemon
   - `Focus <window>`
   - `Open file <path>`
   - `Type this into the selected field: <text>`
+- Workspace intake now supports mixed file inventories (`.frd`, `.zma`, `.txt`, `.md`, `.json`, `.csv`, `.zip`, common image extensions) with safe unsupported-file reporting.
+- Workspace folder summarization now includes mixed-file counts and zip inventory previews.
+- First-pass FRD/ZMA crossover-region suggestions are available with confidence, score, warnings, and plain-language reasoning.
+- REW workflow task support now includes:
+  - launch-or-attach flow for REW,
+  - import of FRD/ZMA files from attached workspace (including controlled zip extraction to a staging path),
+  - explicit typed `not_yet_supported` export result (no fake export automation).
