@@ -1,6 +1,7 @@
 using Grpc.Core;
 using Grpc.Net.Client;
 using Sinapse.Contracts.V1;
+using System.IO;
 
 namespace DesktopShell.Services;
 
@@ -111,6 +112,79 @@ public sealed class DaemonConnectionService
                 AssistantMessage: null,
                 Conversation: null,
                 ErrorMessage: ex.Message);
+        }
+    }
+
+    public async Task<AttachWorkspaceRootResult> AttachWorkspaceRootAsync(
+        string? conversationId,
+        string rootPath,
+        WorkspaceAccessMode accessMode,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            var response = await client.AttachWorkspaceRootAsync(
+                new AttachWorkspaceRootRequest
+                {
+                    ConversationId = conversationId ?? string.Empty,
+                    RootPath = rootPath,
+                    DisplayName = Path.GetFileName(rootPath),
+                    AccessMode = accessMode,
+                    RequestedBy = "desktop-shell",
+                },
+                cancellationToken: cancellationToken);
+
+            return new AttachWorkspaceRootResult(
+                IsSuccess: true,
+                ConversationId: response.Conversation.ConversationId,
+                Root: response.Root,
+                ErrorMessage: null);
+        }
+        catch (RpcException ex)
+        {
+            return new AttachWorkspaceRootResult(
+                IsSuccess: false,
+                ConversationId: conversationId,
+                Root: null,
+                ErrorMessage: $"Daemon error: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new AttachWorkspaceRootResult(
+                IsSuccess: false,
+                ConversationId: conversationId,
+                Root: null,
+                ErrorMessage: ex.Message);
+        }
+    }
+
+    public async Task<GetConversationWorkspaceResult> GetConversationWorkspaceAsync(
+        string conversationId,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            var response = await client.GetConversationWorkspaceAsync(
+                new GetConversationWorkspaceRequest { ConversationId = conversationId },
+                cancellationToken: cancellationToken);
+
+            return new GetConversationWorkspaceResult(
+                IsSuccess: true,
+                ConversationId: response.ConversationId,
+                Roots: response.Roots,
+                ErrorMessage: null);
+        }
+        catch (RpcException ex)
+        {
+            return new GetConversationWorkspaceResult(false, conversationId, [], $"Daemon error: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new GetConversationWorkspaceResult(false, conversationId, [], ex.Message);
         }
     }
 
@@ -259,4 +333,16 @@ public sealed record GetConversationResult(
 public sealed record StartTaskResult(
     bool IsSuccess,
     TaskSummaryDto? Task,
+    string? ErrorMessage);
+
+public sealed record AttachWorkspaceRootResult(
+    bool IsSuccess,
+    string? ConversationId,
+    WorkspaceRootDto? Root,
+    string? ErrorMessage);
+
+public sealed record GetConversationWorkspaceResult(
+    bool IsSuccess,
+    string ConversationId,
+    IReadOnlyList<WorkspaceRootDto> Roots,
     string? ErrorMessage);

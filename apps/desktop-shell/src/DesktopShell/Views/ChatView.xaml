@@ -49,7 +49,8 @@
             <StackPanel Spacing="4">
                 <TextBlock FontSize="16" FontWeight="SemiBold" Text="{x:Bind ViewModel.WorkspaceAttachmentTitle, Mode=OneWay}" />
                 <TextBlock Text="{x:Bind ViewModel.WorkspaceAttachmentHelpText, Mode=OneWay}" TextWrapping="Wrap" />
-                <Button Content="{x:Bind ViewModel.AddFolderButtonLabel, Mode=OneWay}" HorizontalAlignment="Left" />
+                <Button Content="{x:Bind ViewModel.AddFolderButtonLabel, Mode=OneWay}" HorizontalAlignment="Left" Click="AddFolder_Click" />
+                <TextBlock Text="{x:Bind ViewModel.WorkspaceStatusText, Mode=OneWay}" TextWrapping="Wrap" />
             </StackPanel>
 
             <StackPanel Spacing="4">
@@ -74,6 +75,9 @@
                                 <StackPanel Spacing="2">
                                     <TextBlock FontWeight="SemiBold" Text="{x:Bind DisplayName, Mode=OneWay}" />
                                     <TextBlock Text="{x:Bind RootPath, Mode=OneWay}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind AccessModeLabel, Mode=OneWay, StringFormat='Mode: {0}'}" />
+                                    <TextBlock Text="{x:Bind InventorySummary, Mode=OneWay}" />
+                                    <TextBlock Text="{x:Bind SampleFileList, Mode=OneWay}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
                         </DataTemplate>

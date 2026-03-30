@@ -23,6 +23,8 @@ from agent_daemon.services.memory import (
     MessageRecord,
     TaskRecord,
     TaskStepRecord,
+    WorkspaceFileRecord,
+    WorkspaceRootRecord,
 )
 
 pb2, pb2_grpc = load_contract_modules()
@@ -134,6 +136,64 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             created_at=task.created_at,
             updated_at=task.updated_at,
         )
+
+    def _to_workspace_mode(self, access_mode: str) -> int:
+        normalized = access_mode.strip().lower()
+        if normalized == "read_write":
+            return pb2.WORKSPACE_ACCESS_MODE_READ_WRITE
+        return pb2.WORKSPACE_ACCESS_MODE_READ_ONLY
+
+    def _to_workspace_root_dto(self, root: WorkspaceRootRecord):
+        sample_files = [item.relative_path for item in self._memory.list_workspace_files(root.root_id, limit=20)]
+        return pb2.WorkspaceRootDto(
+            root_id=root.root_id,
+            conversation_id=root.conversation_id,
+            display_name=root.display_name,
+            root_path=root.root_path,
+            access_mode=self._to_workspace_mode(root.access_mode),
+            file_count=max(root.file_count, 0),
+            sample_files=sample_files,
+            attached_at=root.attached_at,
+            last_scanned_at=root.last_scanned_at,
+        )
+
+    @staticmethod
+    def _resolve_workspace_mode(mode: int) -> str:
+        if mode == pb2.WORKSPACE_ACCESS_MODE_READ_WRITE:
+            return "read_write"
+        return "read_only"
+
+    def _scan_workspace_root(self, root_id: str, root_path: Path, observed_at: str) -> tuple[int, list[WorkspaceFileRecord]]:
+        scanned_files: list[WorkspaceFileRecord] = []
+        total_files = 0
+        max_persisted_files = 1000
+
+        for current_root, _, files in os.walk(root_path):
+            current_path = Path(current_root)
+            for filename in files:
+                absolute_path = current_path / filename
+                total_files += 1
+
+                if len(scanned_files) >= max_persisted_files:
+                    continue
+
+                try:
+                    relative_path = str(absolute_path.relative_to(root_path))
+                    size_bytes = absolute_path.stat().st_size
+                except (OSError, ValueError):
+                    continue
+
+                scanned_files.append(
+                    WorkspaceFileRecord(
+                        file_id=f"{root_id}:{relative_path}",
+                        root_id=root_id,
+                        relative_path=relative_path,
+                        size_bytes=size_bytes,
+                        discovered_at=observed_at,
+                    )
+                )
+
+        return total_files, scanned_files
 
     def _publish_task_event(
         self,
@@ -257,6 +317,54 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             conversation=self._to_conversation_dto(updated_conversation),
             user_message=self._to_message_dto(user_message),
             assistant_message=self._to_message_dto(assistant_message),
+        )
+
+    def AttachWorkspaceRoot(self, request, context):
+        requested_path = request.root_path.strip()
+        if not requested_path:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "root_path is required")
+
+        root_path = Path(requested_path).expanduser().resolve()
+        if not root_path.exists() or not root_path.is_dir():
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "root_path must be an existing folder")
+
+        conversation = self._ensure_conversation(
+            request.conversation_id.strip(),
+            title="Workspace conversation",
+        )
+        observed_at = self._now()
+        root_id = f"root-{uuid.uuid4().hex[:8]}"
+        display_name = request.display_name.strip() or root_path.name or str(root_path)
+        access_mode = self._resolve_workspace_mode(request.access_mode)
+
+        file_count, inventory_files = self._scan_workspace_root(root_id, root_path, observed_at)
+        root_record = self._memory.upsert_workspace_root(
+            WorkspaceRootRecord(
+                root_id=root_id,
+                conversation_id=conversation.conversation_id,
+                root_path=str(root_path),
+                display_name=display_name,
+                access_mode=access_mode,
+                file_count=file_count,
+                attached_at=observed_at,
+                last_scanned_at=observed_at,
+            )
+        )
+        self._memory.replace_workspace_files(root_record.root_id, inventory_files)
+
+        return pb2.AttachWorkspaceRootResponse(
+            conversation=self._to_conversation_dto(conversation),
+            root=self._to_workspace_root_dto(root_record),
+        )
+
+    def GetConversationWorkspace(self, request, context):
+        if not request.conversation_id.strip():
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "conversation_id is required")
+
+        roots = self._memory.list_workspace_roots(request.conversation_id.strip())
+        return pb2.GetConversationWorkspaceResponse(
+            conversation_id=request.conversation_id.strip(),
+            roots=[self._to_workspace_root_dto(root) for root in roots],
         )
 
     def ListConversations(self, request, context):

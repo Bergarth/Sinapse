@@ -1,10 +1,11 @@
-"""SQLite-backed memory service for conversations, tasks, and steps."""
+"""SQLite-backed memory service for conversations, tasks, steps, and workspaces."""
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,27 @@ class TaskStepRecord:
     detail: str
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class WorkspaceRootRecord:
+    root_id: str
+    conversation_id: str
+    root_path: str
+    display_name: str
+    access_mode: str
+    file_count: int
+    attached_at: str
+    last_scanned_at: str
+
+
+@dataclass(frozen=True)
+class WorkspaceFileRecord:
+    file_id: str
+    root_id: str
+    relative_path: str
+    size_bytes: int
+    discovered_at: str
 
 
 class MemoryService:
@@ -343,3 +365,137 @@ class MemoryService:
             created_at=created_at,
             updated_at=step.updated_at,
         )
+
+    def upsert_workspace_root(self, root: WorkspaceRootRecord) -> WorkspaceRootRecord:
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT root_id, attached_at
+                FROM workspace_roots
+                WHERE conversation_id = ? AND root_path = ?
+                """,
+                (root.conversation_id, root.root_path),
+            ).fetchone()
+
+            root_id = root.root_id
+            attached_at = root.attached_at
+            if existing is not None:
+                root_id = str(existing["root_id"])
+                attached_at = str(existing["attached_at"])
+
+            connection.execute(
+                """
+                INSERT INTO workspace_roots (
+                    root_id,
+                    conversation_id,
+                    root_path,
+                    display_name,
+                    access_mode,
+                    file_count,
+                    attached_at,
+                    last_scanned_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(root_id)
+                DO UPDATE SET
+                  display_name = excluded.display_name,
+                  access_mode = excluded.access_mode,
+                  file_count = excluded.file_count,
+                  last_scanned_at = excluded.last_scanned_at
+                """,
+                (
+                    root_id,
+                    root.conversation_id,
+                    root.root_path,
+                    root.display_name,
+                    root.access_mode,
+                    root.file_count,
+                    attached_at,
+                    root.last_scanned_at,
+                ),
+            )
+            connection.commit()
+
+        return WorkspaceRootRecord(
+            root_id=root_id,
+            conversation_id=root.conversation_id,
+            root_path=root.root_path,
+            display_name=root.display_name,
+            access_mode=root.access_mode,
+            file_count=root.file_count,
+            attached_at=attached_at,
+            last_scanned_at=root.last_scanned_at,
+        )
+
+    def replace_workspace_files(self, root_id: str, files: Iterable[WorkspaceFileRecord]) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM workspace_files WHERE root_id = ?", (root_id,))
+            connection.executemany(
+                """
+                INSERT INTO workspace_files (file_id, root_id, relative_path, size_bytes, discovered_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (item.file_id, item.root_id, item.relative_path, item.size_bytes, item.discovered_at)
+                    for item in files
+                ],
+            )
+            connection.commit()
+
+    def list_workspace_roots(self, conversation_id: str) -> list[WorkspaceRootRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    root_id,
+                    conversation_id,
+                    root_path,
+                    display_name,
+                    access_mode,
+                    file_count,
+                    attached_at,
+                    last_scanned_at
+                FROM workspace_roots
+                WHERE conversation_id = ?
+                ORDER BY attached_at DESC, root_path ASC
+                """,
+                (conversation_id,),
+            ).fetchall()
+
+        return [
+            WorkspaceRootRecord(
+                root_id=str(row["root_id"]),
+                conversation_id=str(row["conversation_id"]),
+                root_path=str(row["root_path"]),
+                display_name=str(row["display_name"]),
+                access_mode=str(row["access_mode"]),
+                file_count=int(row["file_count"]),
+                attached_at=str(row["attached_at"]),
+                last_scanned_at=str(row["last_scanned_at"]),
+            )
+            for row in rows
+        ]
+
+    def list_workspace_files(self, root_id: str, limit: int = 100) -> list[WorkspaceFileRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT file_id, root_id, relative_path, size_bytes, discovered_at
+                FROM workspace_files
+                WHERE root_id = ?
+                ORDER BY relative_path ASC
+                LIMIT ?
+                """,
+                (root_id, limit),
+            ).fetchall()
+
+        return [
+            WorkspaceFileRecord(
+                file_id=str(row["file_id"]),
+                root_id=str(row["root_id"]),
+                relative_path=str(row["relative_path"]),
+                size_bytes=int(row["size_bytes"]),
+                discovered_at=str(row["discovered_at"]),
+            )
+            for row in rows
+        ]

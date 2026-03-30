@@ -18,6 +18,7 @@ public partial class App : Application
 
     public SidebarViewModel SidebarViewModel { get; private set; } = null!;
     public TaskTimelineViewModel TaskTimelineViewModel { get; private set; } = null!;
+    public MainWindow MainWindow { get; private set; } = null!;
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -35,8 +36,8 @@ public partial class App : Application
         SidebarViewModel.ConversationSelected += (_, conversationId) => TaskTimelineViewModel.SetConversationId(conversationId);
 
         var mainWindowViewModel = new MainWindowViewModel(DaemonConnectionService);
-        var window = new MainWindow(mainWindowViewModel);
-        window.Activate();
+        MainWindow = new MainWindow(mainWindowViewModel);
+        MainWindow.Activate();
 
         await mainWindowViewModel.RefreshConnectionStatusAsync();
         await SidebarViewModel.RefreshConversationsAsync();
