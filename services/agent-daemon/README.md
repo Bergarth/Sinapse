@@ -1,42 +1,30 @@
 # agent-daemon
 
-Python 3.13 scaffold for a future agent daemon service.
+Python 3.13 gRPC daemon service with the first real API surface wired from shared contracts.
 
-## What this contains
+## Implemented surface
 
-- Package scaffold using `src/` layout.
-- Entry point (`agent_daemon.main:main`).
-- Placeholder modules for:
-  - planner
-  - executor
-  - memory
-  - workspace service
-- Placeholder health check.
+The service implements `sinapse.contracts.v1.DaemonContract` from `packages/contracts/src/sinapse/contracts/v1/contracts.proto` with placeholder responses for:
 
-No real agent logic is implemented yet.
+- `StartConversation`
+- `SendUserMessage`
+- `StartTask`
+- `ApproveStep`
+- `CancelTask`
+- `ResumeTask`
+- `ListArtifacts`
+- `ObserveSystemState` (server stream)
 
-## Project structure
+Also included:
 
-```text
-services/agent-daemon/
-├── pyproject.toml
-├── README.md
-└── src/
-    └── agent_daemon/
-        ├── __init__.py
-        ├── health.py
-        ├── main.py
-        └── services/
-            ├── __init__.py
-            ├── executor.py
-            ├── memory.py
-            ├── planner.py
-            └── workspace.py
-```
+- `HealthCheck` method on the daemon contract
+- Standard gRPC health service (`grpc.health.v1.Health/Check`)
+- Structured JSON logging
+- Correlation id propagation via `x-correlation-id` metadata
 
-## Run notes
+## Local run
 
-From repository root:
+From repo root:
 
 ```bash
 cd services/agent-daemon
@@ -46,12 +34,15 @@ pip install -e .
 agent-daemon
 ```
 
-Expected output is placeholder startup logging and service names.
+Default bind address is `0.0.0.0:50051`.
 
-## Extension points
+Override with env vars:
 
-- Implement planning behavior in `PlannerService.plan`.
-- Implement execution flow in `ExecutorService.execute`.
-- Add persistence/retrieval in `MemoryService`.
-- Add workspace attachment, mode enforcement, and file lifecycle operations in `WorkspaceService`.
-- Expand `health_check` for liveness/readiness/dependency checks.
+```bash
+AGENT_DAEMON_HOST=127.0.0.1 AGENT_DAEMON_PORT=50055 agent-daemon
+```
+
+## Notes
+
+- Contract Python stubs are generated at runtime from the shared proto using `grpc_tools.protoc`, so `packages/contracts` remains the source of truth.
+- No planner/executor business logic is implemented yet; method bodies intentionally return placeholder data.

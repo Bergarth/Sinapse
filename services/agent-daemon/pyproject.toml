@@ -1,10 +1,15 @@
 [project]
 name = "agent-daemon"
 version = "0.1.0"
-description = "Placeholder Python service scaffold for the agent daemon"
+description = "Python gRPC service scaffold for the agent daemon"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+  "grpcio>=1.74.0",
+  "grpcio-health-checking>=1.74.0",
+  "grpcio-tools>=1.74.0",
+  "protobuf>=6.31.1",
+]
 
 [project.scripts]
 agent-daemon = "agent_daemon.main:main"

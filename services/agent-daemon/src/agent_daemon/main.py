@@ -1,31 +1,30 @@
-"""Entry point for the agent daemon service.
+"""Entry point for the agent daemon service."""
 
-No production agent behavior is implemented yet.
-"""
+from __future__ import annotations
 
-from agent_daemon.health import health_check
-from agent_daemon.services.executor import ExecutorService
-from agent_daemon.services.memory import MemoryService
-from agent_daemon.services.planner import PlannerService
-from agent_daemon.services.workspace import WorkspaceService
+import os
+
+from agent_daemon.logging_utils import configure_logging
+from agent_daemon.server import create_server
 
 
 def main() -> None:
-    """Start the placeholder agent daemon."""
-    planner = PlannerService()
-    executor = ExecutorService()
-    memory = MemoryService()
-    workspace = WorkspaceService()
+    """Start the daemon gRPC server."""
 
-    # Placeholder startup hook to confirm module wiring.
-    if health_check().status != "ok":
-        raise SystemExit("Service health check failed.")
+    logger = configure_logging()
 
-    print("agent-daemon started (placeholder mode)")
-    print(f"planner={planner.name}")
-    print(f"executor={executor.name}")
-    print(f"memory={memory.name}")
-    print(f"workspace={workspace.name}")
+    host = os.environ.get("AGENT_DAEMON_HOST", "0.0.0.0")
+    port = int(os.environ.get("AGENT_DAEMON_PORT", "50051"))
+    bind_address = f"{host}:{port}"
+
+    server = create_server()
+    server.add_insecure_port(bind_address)
+    server.start()
+
+    logger.info("agent-daemon gRPC server started", extra={"grpc_method": "startup"})
+    logger.info(f"listening on {bind_address}", extra={"grpc_method": "startup"})
+
+    server.wait_for_termination()
 
 
 if __name__ == "__main__":
