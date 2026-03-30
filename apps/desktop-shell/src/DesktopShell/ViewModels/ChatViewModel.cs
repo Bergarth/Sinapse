@@ -38,6 +38,10 @@ public sealed class ChatMessageViewModel
 
     public bool IsAssistant { get; init; }
 
+    public bool HasWarnings { get; init; }
+
+    public string WarningBannerText => HasWarnings ? "⚠ Includes warnings" : string.Empty;
+
     public required string HandlerLabel { get; init; }
 
     public ObservableCollection<SearchSourceViewModel> Sources { get; init; } = [];
@@ -416,9 +420,21 @@ public class ChatViewModel : INotifyPropertyChanged
             Content = message.Content,
             Timestamp = message.CreatedAt,
             IsAssistant = message.Role == MessageRole.Assistant,
+            HasWarnings = message.Role == MessageRole.Assistant && ContainsWarning(message.Content),
             HandlerLabel = BuildHandlerLabel(message),
             Sources = sourceViewModels,
         };
+    }
+
+    private static bool ContainsWarning(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        var normalized = content.ToLowerInvariant();
+        return normalized.Contains("⚠") || normalized.Contains("warning");
     }
 
     private static string BuildHandlerLabel(ChatMessageDto message)
