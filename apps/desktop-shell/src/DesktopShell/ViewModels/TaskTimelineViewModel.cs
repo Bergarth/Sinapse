@@ -24,7 +24,7 @@ public class TaskTimelineViewModel : INotifyPropertyChanged
     private readonly DispatcherQueue _dispatcherQueue;
     private string? _conversationId;
     private bool _isStartingTask;
-    private string _statusText = "Start your first task to see a live timeline.";
+    private string _statusText = "Run a read-only desktop task to list your open windows.";
 
     public TaskTimelineViewModel(DaemonConnectionService daemonConnectionService, DispatcherQueue dispatcherQueue)
     {
@@ -77,7 +77,7 @@ public class TaskTimelineViewModel : INotifyPropertyChanged
 
         IsStartingTask = true;
         StatusText = "Starting task...";
-        var taskTitle = $"First task flow ({DateTimeOffset.Now:HH:mm:ss})";
+        var taskTitle = $"List open windows (read-only) {DateTimeOffset.Now:HH:mm:ss}";
         var result = await _daemonConnectionService.StartTaskAsync(_conversationId, taskTitle, cancellationToken);
         IsStartingTask = false;
 
