@@ -7,6 +7,7 @@ namespace DesktopShell.Services;
 public sealed class DaemonConnectionService
 {
     private readonly string _daemonEndpoint;
+    private CancellationTokenSource? _observationCts;
 
     public DaemonConnectionService(string? daemonEndpoint = null)
     {
@@ -148,6 +149,75 @@ public sealed class DaemonConnectionService
         }
     }
 
+    public async Task<StartTaskResult> StartTaskAsync(
+        string? conversationId,
+        string title,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            var response = await client.StartTaskAsync(
+                new StartTaskRequest
+                {
+                    ConversationId = conversationId ?? string.Empty,
+                    Title = title,
+                    RequestedBy = "desktop-shell",
+                },
+                cancellationToken: cancellationToken);
+
+            return new StartTaskResult(true, response.Task, null);
+        }
+        catch (RpcException ex)
+        {
+            return new StartTaskResult(false, null, $"Daemon error: {ex.Status.Detail}");
+        }
+        catch (Exception ex)
+        {
+            return new StartTaskResult(false, null, ex.Message);
+        }
+    }
+
+    public Task BeginSystemStateObservationAsync(
+        Action<SystemStateEvent> onEvent,
+        CancellationToken cancellationToken = default)
+    {
+        _observationCts?.Cancel();
+        _observationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        return Task.Run(() => ObserveSystemStateLoopAsync(onEvent, _observationCts.Token), _observationCts.Token);
+    }
+
+    public void StopSystemStateObservation()
+    {
+        _observationCts?.Cancel();
+    }
+
+    private async Task ObserveSystemStateLoopAsync(Action<SystemStateEvent> onEvent, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_daemonEndpoint);
+            var client = new DaemonContract.DaemonContractClient(channel);
+            using var stream = client.ObserveSystemState(
+                new ObserveSystemStateRequest { WorkspaceId = "desktop-shell-workspace" },
+                cancellationToken: cancellationToken);
+
+            while (await stream.ResponseStream.MoveNext(cancellationToken))
+            {
+                onEvent(stream.ResponseStream.Current);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // no-op; expected during app shutdown or restart.
+        }
+        catch
+        {
+            // Keep this first implementation lightweight; timeline displays only received events.
+        }
+    }
+
     private static DaemonConnectionResult DisconnectedResult(string endpoint, string errorDetail)
     {
         return new DaemonConnectionResult(
@@ -184,4 +254,9 @@ public sealed record GetConversationResult(
     bool IsSuccess,
     ConversationDto? Conversation,
     IReadOnlyList<ChatMessageDto> Messages,
+    string? ErrorMessage);
+
+public sealed record StartTaskResult(
+    bool IsSuccess,
+    TaskSummaryDto? Task,
     string? ErrorMessage);

@@ -80,6 +80,25 @@ message TaskSummaryDto {
   string updated_at = 7;
 }
 
+enum TaskEventType {
+  TASK_EVENT_TYPE_UNSPECIFIED = 0;
+  TASK_EVENT_TYPE_TASK_STARTED = 1;
+  TASK_EVENT_TYPE_STEP_STARTED = 2;
+  TASK_EVENT_TYPE_STEP_FINISHED = 3;
+  TASK_EVENT_TYPE_TASK_FINISHED = 4;
+  TASK_EVENT_TYPE_TASK_FAILED = 5;
+}
+
+message TaskTimelineEvent {
+  string task_id = 1;
+  string step_id = 2;
+  string title = 3;
+  string detail = 4;
+  TaskEventType event_type = 5;
+  TaskStatus task_status = 6;
+  string observed_at = 7;
+}
+
 message ConversationDto {
   string conversation_id = 1;
   string title = 2;
@@ -215,6 +234,7 @@ message SystemStateEvent {
   WorkspaceDto workspace = 3;
   repeated TaskSummaryDto tasks = 4;
   repeated ServiceHealthDto services = 5;
+  repeated TaskTimelineEvent task_timeline_events = 6;
 }
 
 service DaemonContract {
