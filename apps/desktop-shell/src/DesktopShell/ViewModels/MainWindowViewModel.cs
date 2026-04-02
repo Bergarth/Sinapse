@@ -138,10 +138,15 @@ public class MainWindowViewModel : INotifyPropertyChanged
         return capabilityName.Trim().ToLowerInvariant() switch
         {
             "chat" => "Chat assistant",
+            "ollama" => "Ollama local model",
             "tasks" => "Task tracking",
             "workspaces" => "Workspace files",
             "windows operator" => "Desktop app controls",
+            "secure secret storage" => "Secure secret storage",
+            "email workflows" => "Email send readiness",
+            "messaging workflows" => "Messaging send readiness",
             "browser support" => "Web browsing support",
+            "web search" => "Web search path",
             "speech-to-text" => "Speech-to-text",
             "text-to-speech" => "Text-to-speech",
             _ => capabilityName,

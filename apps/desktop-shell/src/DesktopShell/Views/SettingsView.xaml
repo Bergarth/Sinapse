@@ -11,7 +11,7 @@
         <Border Padding="16" BorderBrush="Gray" BorderThickness="1" CornerRadius="8" Margin="12">
             <StackPanel Spacing="12">
                 <TextBlock FontSize="20" FontWeight="SemiBold" Text="Settings" />
-                <TextBlock Text="Pick your default model behavior, provider preference, and placeholder API key references. No real secrets are stored yet." TextWrapping="Wrap" />
+                <TextBlock Text="Pick your default model behavior, provider preference, and API key references. Secret storage is daemon-gated and currently requires a Windows daemon host." TextWrapping="Wrap" />
 
                 <StackPanel Spacing="6">
                     <TextBlock Text="Model mode" FontWeight="SemiBold" />
@@ -37,7 +37,7 @@
                         <TextBox Width="180" Header="Provider ID" Text="{x:Bind ViewModel.SearchProviderId, Mode=TwoWay}" />
                         <TextBox Width="320" Header="Endpoint" Text="{x:Bind ViewModel.SearchEndpoint, Mode=TwoWay}" />
                     </StackPanel>
-                    <TextBox Header="API key placeholder ref (optional)" PlaceholderText="placeholder://provider/key-id" Text="{x:Bind ViewModel.SearchApiKeyPlaceholderRef, Mode=TwoWay}" />
+                    <TextBox Header="Search API key reference (optional)" PlaceholderText="secret://local/search-provider-key" Text="{x:Bind ViewModel.SearchApiKeyPlaceholderRef, Mode=TwoWay}" />
                 </StackPanel>
 
                 <StackPanel Spacing="8">
@@ -66,12 +66,12 @@
                 </StackPanel>
 
                 <StackPanel Spacing="8">
-                    <TextBlock Text="API key placeholders" FontWeight="SemiBold" />
-                    <TextBlock Text="These entries only store placeholder references (placeholder://...). Real secret storage will be integrated later." TextWrapping="Wrap" Opacity="0.8" />
+                    <TextBlock Text="API key references" FontWeight="SemiBold" />
+                    <TextBlock Text="Track provider key entries here. If secure secret storage is unavailable, saves may fail with a dependency message from the daemon." TextWrapping="Wrap" Opacity="0.8" />
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <ComboBox x:Name="ProviderForKeyComboBox" Width="180" DisplayMemberPath="DisplayName" SelectedValuePath="ProviderId" SelectedValue="{x:Bind ViewModel.SelectedProviderIdForApiKey, Mode=TwoWay}" ItemsSource="{x:Bind ViewModel.Providers, Mode=OneWay}" />
-                        <TextBox Width="200" PlaceholderText="Placeholder label" Text="{x:Bind ViewModel.NewApiKeyLabel, Mode=TwoWay}" />
-                        <Button Content="Add placeholder" Click="AddApiKeyPlaceholder_Click" />
+                        <TextBox Width="200" PlaceholderText="Secret label" Text="{x:Bind ViewModel.NewApiKeyLabel, Mode=TwoWay}" />
+                        <Button Content="Add reference" Click="AddApiKeyPlaceholder_Click" />
                         <Button Content="Remove selected" Click="RemoveApiKeyPlaceholder_Click" />
                     </StackPanel>
                     <ListView x:Name="ApiKeysList" ItemsSource="{x:Bind ViewModel.ApiKeyEntries, Mode=OneWay}" SelectionChanged="ApiKeysList_SelectionChanged">

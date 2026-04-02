@@ -146,7 +146,7 @@ public class SettingsViewModel : INotifyPropertyChanged
         }
 
         HydrateFromDto(result.Settings);
-        StatusMessage = "Settings loaded. You can safely edit placeholders and save.";
+        StatusMessage = "Settings loaded. You can edit provider and secret reference metadata, then save.";
     }
 
     public void AddProvider()
@@ -188,7 +188,7 @@ public class SettingsViewModel : INotifyPropertyChanged
 
         Providers.Remove(SelectedProvider);
         SelectedProvider = null;
-        StatusMessage = $"Removed provider '{providerId}' and {linkedEntries.Count} linked API key placeholder(s).";
+        StatusMessage = $"Removed provider '{providerId}' and {linkedEntries.Count} linked API key reference(s).";
     }
 
     public void AddApiKeyPlaceholder()
@@ -196,14 +196,14 @@ public class SettingsViewModel : INotifyPropertyChanged
         var providerId = SelectedProviderIdForApiKey.Trim();
         if (string.IsNullOrWhiteSpace(providerId) || !Providers.Any(provider => provider.ProviderId == providerId))
         {
-            StatusMessage = "Choose an existing provider before adding an API key placeholder.";
+            StatusMessage = "Choose an existing provider before adding an API key reference.";
             return;
         }
 
         var label = NewApiKeyLabel.Trim();
         if (string.IsNullOrWhiteSpace(label))
         {
-            StatusMessage = "Please add a short label so you can recognize this API key placeholder later.";
+            StatusMessage = "Please add a short label so you can recognize this API key reference later.";
             return;
         }
 
@@ -219,20 +219,20 @@ public class SettingsViewModel : INotifyPropertyChanged
             });
 
         NewApiKeyLabel = string.Empty;
-        StatusMessage = "Added API key placeholder entry (no secret was saved).";
+        StatusMessage = "Added API key reference entry. Saving may require daemon-side secure storage availability.";
     }
 
     public void RemoveSelectedApiKeyPlaceholder()
     {
         if (SelectedApiKeyEntry is null)
         {
-            StatusMessage = "Select an API key placeholder to remove.";
+            StatusMessage = "Select an API key reference to remove.";
             return;
         }
 
         ApiKeyEntries.Remove(SelectedApiKeyEntry);
         SelectedApiKeyEntry = null;
-        StatusMessage = "Removed API key placeholder entry.";
+        StatusMessage = "Removed API key reference entry.";
     }
 
     public async Task SaveAsync(CancellationToken cancellationToken = default)
