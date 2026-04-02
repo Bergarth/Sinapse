@@ -1,26 +1,51 @@
 # agent-daemon
 
-Python 3.13 gRPC daemon service with the first real API surface wired from shared contracts.
+Python gRPC daemon implementing `sinapse.contracts.v1.DaemonContract`.
 
-## Implemented surface
+This README reflects the current implementation as of **2026-04-02**.
 
-The service implements `sinapse.contracts.v1.DaemonContract` from `packages/contracts/src/sinapse/contracts/v1/contracts.proto` with production-backed persistence and first real task handlers for:
+## Implemented API surface
 
+- `HealthCheck`
 - `StartConversation`
+- `ListConversations`
+- `GetConversation`
 - `SendUserMessage`
+- `GetAppSettings`
+- `UpdateAppSettings`
+- `TranscribeAudio`
+- `SynthesizeSpeech`
+- `AttachWorkspaceRoot`
+- `GetConversationWorkspace`
 - `StartTask`
 - `ApproveStep`
 - `CancelTask`
 - `ResumeTask`
-- `ListArtifacts` (backed by persisted artifact records)
+- `ListArtifacts`
 - `ObserveSystemState` (server stream)
 
-Also included:
+Also includes gRPC health service (`grpc.health.v1.Health/Check`) and correlation-id propagation.
 
-- `HealthCheck` method on the daemon contract
-- Standard gRPC health service (`grpc.health.v1.Health/Check`)
-- Structured JSON logging
-- Correlation id propagation via `x-correlation-id` metadata
+## Runtime behavior highlights
+
+- SQLite-backed persistence via `packages/memory-store` migrations.
+- Model routing supports Ollama with placeholder fallback.
+- Approval-gated task system with persisted approvals and pending-approval restoration at startup.
+- Artifact persistence to disk + metadata in SQLite.
+- Workspace intake/summarization for mixed file sets.
+- FRD/ZMA parsing + first-pass crossover recommendations.
+- Browser operator integration (read-only open URL plus controlled session task envelopes).
+- Windows operator integration (enumerate windows + write-capable actions, Windows only).
+- REW workflow support: attach/launch + import; export explicitly `not_yet_supported`.
+- Communications workflow support: SMTP email and Slack webhook messaging, both approval-gated.
+
+## Important gates and boundaries
+
+- Secure secret storage requires Windows DPAPI (non-Windows fails closed for secret writes).
+- STT requires `openai-whisper`; TTS requires `pyttsx3`.
+- Email/messaging sends require valid communications config and `secret://local/...` refs.
+- Browser upload/click/fill/collect-sources remain explicitly `NOT_YET_SUPPORTED`.
+- Pending approvals are restored after restart, but interrupted task execution threads are not fully replayed.
 
 ## Local run
 
@@ -34,31 +59,8 @@ pip install -e .
 agent-daemon
 ```
 
-Default bind address is `0.0.0.0:50051`.
-
-Override with env vars:
+Override bind host/port:
 
 ```bash
 AGENT_DAEMON_HOST=127.0.0.1 AGENT_DAEMON_PORT=50055 agent-daemon
 ```
-
-## Notes
-
-- Contract Python stubs are generated at runtime from the shared proto using `grpc_tools.protoc`, so `packages/contracts` remains the source of truth.
-- Generic/unmatched tasks now return explicit `NOT_YET_SUPPORTED` task results (with persisted artifacts) instead of fake placeholder progress.
-- Windows operator task handlers now support approval-gated write-capable actions:
-  - `Open Notepad` / `Launch <app>`
-  - `Focus <window>`
-  - `Open file <path>`
-  - `Type this into the selected field: <text>`
-- Workspace intake now supports mixed file inventories (`.frd`, `.zma`, `.txt`, `.md`, `.json`, `.csv`, `.zip`, common image extensions) with safe unsupported-file reporting.
-- Workspace folder summarization now includes mixed-file counts and zip inventory previews.
-- First-pass FRD/ZMA crossover-region suggestions are available with confidence, score, warnings, and plain-language reasoning.
-- REW workflow task support now includes:
-  - launch-or-attach flow for REW,
-  - import of FRD/ZMA files from attached workspace (including controlled zip extraction to a staging path),
-  - explicit typed `not_yet_supported` export result (no fake export automation).
-- Browser workflows now include controlled session tasks with explicit navigation/read/download/upload paths, with typed `NOT_YET_SUPPORTED` responses for unsupported interactive actions.
-- Communications workflows now include:
-  - Email draft + review artifacts + approval-gated SMTP send path (workspace attachments supported).
-  - Messaging draft + review artifacts + approval-gated Slack webhook send path.

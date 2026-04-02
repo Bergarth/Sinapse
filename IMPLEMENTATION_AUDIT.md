@@ -1,280 +1,193 @@
-# Implementation Audit
+# IMPLEMENTATION_AUDIT
 
-Audit date: 2026-03-30
+Audit date: 2026-04-02
 
-Legend:
-- **COMPLETE** = capability is implemented and wired end-to-end for its stated scope.
-- **PARTIAL** = substantial implementation exists, but significant limitations/gaps remain.
-- **PLACEHOLDER ONLY** = scaffold/stub exists with placeholder behavior, no real implementation.
-- **MISSING** = no meaningful implementation found.
+This pass reflects **current code behavior** in this repository. Where docs and code differed, code was treated as source of truth.
 
-> Note: when docs and code differed, this audit used code as source of truth.
+## Status legend
 
-## 1) Desktop shell scaffold — **COMPLETE**
-
-**Why**
-- A WinUI 3 desktop shell project exists with app bootstrap, main window, views, and viewmodels wired.
-- Project references generated gRPC client code from shared protobuf contracts.
-
-**Supporting files**
-- `apps/desktop-shell/src/DesktopShell/DesktopShell.csproj`
-- `apps/desktop-shell/src/DesktopShell/App.xaml.cs`
-- `apps/desktop-shell/src/DesktopShell/MainWindow.xaml`
-- `apps/desktop-shell/src/DesktopShell/Views/ChatView.xaml`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/MainWindowViewModel.cs`
+- **Implemented**: code path exists and is wired in runtime flow for the documented scope.
+- **Implemented (dependency/config gated)**: code path exists but only runs when environment, OS, secrets, or optional dependencies are present.
+- **Partial**: meaningful implementation exists, but important sub-flows are explicitly not yet supported.
+- **Unverified in this pass**: not manually executed end-to-end during this documentation pass.
 
 ---
 
-## 2) Shell-to-daemon connection — **COMPLETE**
+## 1) Shell ↔ daemon connection
 
-**Why**
-- Desktop shell opens a gRPC channel and calls daemon endpoints (health, conversation, messaging, settings, workspace, task, speech).
-- Main window startup status and multiple feature workflows depend on this live connection service.
+**Status:** Implemented (unverified in this pass)
 
-**Supporting files**
-- `apps/desktop-shell/src/DesktopShell/Services/DaemonConnectionService.cs`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/MainWindowViewModel.cs`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/ChatViewModel.cs`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/TaskTimelineViewModel.cs`
+- The desktop shell creates a gRPC client to `DaemonContract`, defaults to `http://127.0.0.1:50051`, and calls `HealthCheck` during startup.
+- Startup UI reflects daemon/environment capability information returned by the daemon.
+- The shell also opens a long-lived `ObserveSystemState` stream for timeline updates.
 
 ---
 
-## 3) Shared contracts/protobuf — **COMPLETE**
+## 2) Chat and persistence
 
-**Why**
-- Shared protobuf contract defines DTOs/enums and full daemon service RPC surface.
-- Both daemon and desktop shell load/use this same contract (`GrpcServices="Client"` in shell, dynamic runtime loading in daemon).
+**Status:** Implemented (unverified in this pass)
 
-**Supporting files**
-- `packages/contracts/src/sinapse/contracts/v1/contracts.proto`
-- `apps/desktop-shell/src/DesktopShell/DesktopShell.csproj`
-- `services/agent-daemon/src/agent_daemon/contracts_runtime.py`
+- `SendUserMessage` persists user + assistant messages to SQLite and returns the persisted conversation/message DTOs.
+- Conversation list/get endpoints read from SQLite.
+- Shell chat viewmodel can start/load conversations and display persisted history.
 
 ---
 
-## 4) Daemon gRPC API surface — **PARTIAL**
+## 3) Settings and secret storage
 
-**Why**
-- The daemon implements all RPCs declared in protobuf service.
-- However, at least one endpoint is explicit placeholder behavior (`ListArtifacts` returns `artifact-placeholder`), so API surface is present but not fully real.
+**Status:** Implemented (dependency/config gated)
 
-**Supporting files**
-- `packages/contracts/src/sinapse/contracts/v1/contracts.proto`
-- `services/agent-daemon/src/agent_daemon/server.py`
-
----
-
-## 5) Conversation persistence in SQLite — **COMPLETE**
-
-**Why**
-- SQLite-backed memory service applies migrations and persists conversations/messages.
-- Send message flow writes user and assistant messages; list/get conversation reads persisted rows.
-
-**Supporting files**
-- `services/agent-daemon/src/agent_daemon/services/memory.py`
-- `packages/memory-store/migrations/0001_init.sql`
-- `packages/memory-store/migrations/0005_message_model_metadata.sql`
-- `services/agent-daemon/src/agent_daemon/server.py`
+- Model/search/speech/communications settings are persisted in SQLite via `app_settings`.
+- API/search/communications secret refs must use `secret://local/...` for secure mode.
+- Secure secret writes use Windows DPAPI and fail closed on non-Windows hosts.
+- Shell settings UI is wired to get/update daemon settings and API key entries.
 
 ---
 
-## 6) Task timeline event flow — **PARTIAL**
+## 4) Approvals and restart recovery
 
-**Why**
-- Daemon publishes task timeline events and streams them via `ObserveSystemState`; shell subscribes and renders timeline entries.
-- Core execution path is still a placeholder task runner for many tasks (`_run_placeholder_task`), so flow is real but not fully production-grade for arbitrary tasks.
+**Status:** Partial
 
-**Supporting files**
-- `services/agent-daemon/src/agent_daemon/server.py`
-- `services/agent-daemon/src/agent_daemon/services/memory.py`
-- `packages/contracts/src/sinapse/contracts/v1/contracts.proto`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/TaskTimelineViewModel.cs`
-- `apps/desktop-shell/src/DesktopShell/Services/DaemonConnectionService.cs`
+- High-risk task steps create persisted approval records and emit approval-required timeline events.
+- Shell can approve/deny/cancel through gRPC.
+- On daemon startup, pending approvals are restored into in-memory wait structures.
+- **Limitation:** daemon does not resume previously interrupted execution threads after restart; persisted pending approvals are visible/reconcilable, but in-flight task execution is not fully replayed.
 
 ---
 
-## 7) Workspace attachment with real persistence — **COMPLETE**
+## 5) Ollama path
 
-**Why**
-- `AttachWorkspaceRoot` validates and resolves folder path, scans files, persists root metadata and file inventory in SQLite.
-- Shell can attach folders and retrieve persisted workspace roots/files for a conversation.
+**Status:** Implemented (dependency/config gated)
 
-**Supporting files**
-- `services/agent-daemon/src/agent_daemon/server.py`
-- `services/agent-daemon/src/agent_daemon/services/memory.py`
-- `packages/memory-store/migrations/0003_workspace.sql`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/ChatViewModel.cs`
-- `apps/desktop-shell/src/DesktopShell/Services/DaemonConnectionService.cs`
+- Router probes Ollama (`/api/tags`) and can generate responses (`/api/generate`).
+- If Ollama is unavailable or errors, daemon falls back to built-in placeholder provider with explicit fallback text.
 
 ---
 
-## 8) Settings for model/provider/API keys — **PARTIAL**
+## 6) STT/TTS
 
-**Why**
-- Shell supports editing model mode/provider preference/providers/API key placeholders/search/speech settings.
-- Daemon persists settings in SQLite and enforces validation.
-- API keys are placeholders only (`placeholder://...` required), not real secret storage.
+**Status:** Implemented (dependency/config gated)
 
-**Supporting files**
-- `apps/desktop-shell/src/DesktopShell/ViewModels/SettingsViewModel.cs`
-- `services/agent-daemon/src/agent_daemon/server.py`
-- `services/agent-daemon/src/agent_daemon/services/memory.py`
-- `packages/memory-store/migrations/0004_app_settings.sql`
+- Shell supports push-to-talk recording and sends WAV to daemon.
+- Daemon STT uses `openai-whisper` if installed; otherwise returns explicit unavailable guidance.
+- Daemon TTS uses `pyttsx3` if installed; otherwise returns explicit unavailable guidance.
+- Shell can request synthesis and play WAV bytes.
 
 ---
 
-## 9) Windows operator real read-only action — **COMPLETE**
+## 7) Windows operator read and write actions
 
-**Why**
-- Real read-only implementation enumerates visible top-level windows using Win32 APIs (`ctypes.windll.user32.EnumWindows`).
-- Daemon calls this action from chat and task flows.
-- Mutating actions remain intentionally blocked, but requested read-only capability exists.
+**Status:** Implemented (dependency/config gated)
 
-**Supporting files**
-- `packages/windows-operator/src/windows_operator/service.py`
-- `services/agent-daemon/src/agent_daemon/server.py`
-- `services/agent-daemon/src/agent_daemon/windows_operator_runtime.py`
+- Read action: enumerate visible top-level windows via Win32 APIs.
+- Write actions implemented: launch app, focus window, open file, type text.
+- Write actions are routed through approval-gated task flows.
+- Entire operator capability is gated to Windows runtime.
 
 ---
 
-## 10) Browser operator real read-only action — **COMPLETE**
+## 8) Browser workflows
 
-**Why**
-- Real read-only URL open is implemented using controlled HTTP fetch and visible-text extraction/summarization.
-- Daemon invokes this from chat and task flows.
-- Interactive/mutating browser actions are still blocked, but requested read-only capability exists.
+**Status:** Partial (dependency/config gated by network/runtime)
 
-**Supporting files**
-- `packages/browser-operator/src/browser_operator/service.py`
-- `services/agent-daemon/src/agent_daemon/server.py`
-- `services/agent-daemon/src/agent_daemon/browser_operator_runtime.py`
+- Read-only open URL is implemented via controlled HTTP fetch + visible-text summary extraction.
+- Session workflow scaffolding exists for open session, navigate, read, download, upload.
+- Download path writes artifacts; upload/click/fill/collect-sources explicitly return typed `NOT_YET_SUPPORTED` for unsupported automation.
 
 ---
 
-## 11) Approval flow with persistence — **PARTIAL**
+## 9) Workspace intake and summarization
 
-**Why**
-- Approval gating exists: risk classification, waiting-for-approval task status, approval event emission, shell approve/deny/cancel actions.
-- Approval records are persisted to SQLite (`approvals` table, `upsert_approval`).
-- Runtime pending approvals are tracked in-memory for active waits; no daemon restart recovery/resume path for pending approval execution was found.
+**Status:** Implemented (unverified in this pass)
 
-**Supporting files**
-- `services/agent-daemon/src/agent_daemon/server.py`
-- `services/agent-daemon/src/agent_daemon/services/memory.py`
-- `packages/memory-store/migrations/0006_approvals.sql`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/TaskTimelineViewModel.cs`
-- `apps/desktop-shell/src/DesktopShell/Services/DaemonConnectionService.cs`
+- Workspace roots attach with path validation + file inventory persisted to SQLite.
+- Intake supports FRD/ZMA/text/markdown/json/csv/images/zip classification with warnings.
+- Workspace summary includes counts by type, samples, and zip inventory previews.
 
 ---
 
-## 12) Real Ollama integration — **PARTIAL**
+## 10) FRD/ZMA analysis
 
-**Why**
-- Real Ollama HTTP integration is implemented (`/api/tags` health/status and `/api/generate` completion).
-- Router falls back to placeholder provider on failure/unavailability, so behavior is mixed real+fallback.
+**Status:** Implemented (unverified in this pass)
 
-**Supporting files**
-- `services/agent-daemon/src/agent_daemon/services/model_router.py`
-- `services/agent-daemon/src/agent_daemon/server.py`
+- FRD and ZMA parsers read numeric tables, validate shape/ranges/order, and report warnings/errors.
+- Chat/task flows invoke analysis over attached workspace files.
 
 ---
 
-## 13) Real web search integration — **COMPLETE**
+## 11) Crossover suggestions
 
-**Why**
-- Real web search adapter performs network requests to DuckDuckGo Instant Answer API and returns answer + sources.
-- Daemon wires this into message handling when search intent is detected and search is enabled in settings.
+**Status:** Implemented (unverified in this pass)
 
-**Supporting files**
-- `services/agent-daemon/src/agent_daemon/services/search_adapter.py`
-- `services/agent-daemon/src/agent_daemon/server.py`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/SettingsViewModel.cs`
+- Daemon computes first-pass crossover region rankings from parsed FRD/ZMA summaries.
+- Output includes score/confidence/reasoning and warning context.
 
 ---
 
-## 14) Real push-to-talk STT — **PARTIAL**
+## 12) REW workflow
 
-**Why**
-- Shell has real push-to-talk capture path (start/stop microphone WAV recording), sends audio to daemon.
-- Daemon uses real Whisper-based transcription if dependency is installed; otherwise returns explicit precondition failure.
-- Therefore implementation is real but dependency-gated and not guaranteed available in all environments.
+**Status:** Partial (dependency/config gated)
 
-**Supporting files**
-- `apps/desktop-shell/src/DesktopShell/Services/PushToTalkRecorderService.cs`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/ChatViewModel.cs`
-- `apps/desktop-shell/src/DesktopShell/Services/DaemonConnectionService.cs`
-- `services/agent-daemon/src/agent_daemon/speech_runtime.py`
-- `services/agent-daemon/src/agent_daemon/server.py`
+- Flow supports attach-or-launch REW, import FRD/ZMA (including controlled extraction from zip), and persisted workflow artifacts.
+- Export automation intentionally returns typed `not_yet_supported`.
+- Requires Windows operator availability and local REW executable accessibility.
 
 ---
 
-## 15) Real TTS replies — **PARTIAL**
+## 13) Email workflow
 
-**Why**
-- Shell can request speech synthesis and play returned WAV bytes.
-- Daemon uses `pyttsx3` for local TTS when installed; otherwise returns explicit precondition failure.
-- Spoken replies are optional and settings-gated.
+**Status:** Implemented (dependency/config gated)
 
-**Supporting files**
-- `apps/desktop-shell/src/DesktopShell/Services/SpeechPlaybackService.cs`
-- `apps/desktop-shell/src/DesktopShell/ViewModels/ChatViewModel.cs`
-- `apps/desktop-shell/src/DesktopShell/Services/DaemonConnectionService.cs`
-- `services/agent-daemon/src/agent_daemon/speech_runtime.py`
-- `services/agent-daemon/src/agent_daemon/server.py`
+- Daemon drafts email artifact, requests approval, and sends via SMTP when configured.
+- Supports workspace file attachments.
+- Requires SMTP host/from/user and `secret://local/...` password ref that resolves in local secret store.
 
 ---
 
-## 16) Workspace file summarization — **PARTIAL**
+## 14) Messaging workflow
 
-**Why**
-- Daemon can summarize/analyze attached workspace files specifically for `.frd` and `.zma` when asked.
-- No generic file summarization pipeline for arbitrary workspace file types was found.
+**Status:** Implemented (dependency/config gated)
 
-**Supporting files**
-- `services/agent-daemon/src/agent_daemon/server.py`
-- `services/agent-daemon/src/agent_daemon/services/frd_zma_parser.py`
-- `services/agent-daemon/src/agent_daemon/services/memory.py`
+- Daemon drafts messaging artifact, requests approval, and sends via Slack webhook.
+- Current provider path is `slack-webhook`; other providers return explicit `NOT_YET_SUPPORTED`.
+- Requires `secret://local/...` webhook ref.
 
 ---
 
-## 17) Real FRD parsing — **COMPLETE**
+## 15) Artifact listing
 
-**Why**
-- FRD parser reads file content, parses numeric rows, validates shape/ranges/order, and returns structured summary with warnings/errors.
-- Daemon invokes parser over attached workspace FRD files and returns generated summary content.
+**Status:** Implemented (unverified in this pass)
 
-**Supporting files**
-- `services/agent-daemon/src/agent_daemon/services/frd_zma_parser.py`
-- `services/agent-daemon/src/agent_daemon/server.py`
+- Task handlers persist artifacts to disk + SQLite metadata.
+- `ListArtifacts` returns persisted artifact rows for a task (not placeholder).
 
 ---
 
-## 18) Real ZMA parsing — **COMPLETE**
+## Summary: implemented now vs still unverified
 
-**Why**
-- ZMA parser shares same real parsing/validation pipeline, with ZMA-specific column expectations and warnings.
-- Daemon invokes parser over attached workspace ZMA files and returns generated summary content.
+### Truly implemented now (code present and wired)
 
-**Supporting files**
-- `services/agent-daemon/src/agent_daemon/services/frd_zma_parser.py`
-- `services/agent-daemon/src/agent_daemon/server.py`
+- Shell/daemon gRPC integration, health checks, and system-state streaming.
+- SQLite-backed persistence for conversations/messages/tasks/steps/workspaces/settings/approvals/artifacts.
+- Approval-gated operator/task workflows with persisted approval records.
+- Ollama + placeholder model routing.
+- Workspace intake + FRD/ZMA parsing + crossover suggestion flow.
+- REW/email/messaging/browser workflow handlers with explicit typed not-yet-supported boundaries where applicable.
 
----
+### Still dependency-gated or environment-gated
 
-## What is actually working now
+- Windows-only paths: secure secret storage and windows operator actions.
+- Ollama availability.
+- STT (`openai-whisper`) and TTS (`pyttsx3`) optional dependencies.
+- Email/messaging depend on valid communications config + secrets.
 
-- Desktop shell and daemon communicate over shared gRPC contracts.
-- Conversations/messages, tasks, workspace roots/file inventories, app settings, and approval records persist in SQLite.
-- Chat supports local model routing (with Ollama when reachable, placeholder fallback otherwise).
-- Read-only Windows window enumeration and read-only browser URL open/summarization are implemented.
-- Task/system event streaming updates timeline UI.
-- Search, push-to-talk transcription, and spoken replies are implemented paths (with dependency/config gates for some runtime features).
-- FRD/ZMA parsing and summary generation from attached workspace files are implemented.
+### Still partial or not fully end-to-end
 
-## What still needs implementation
+- Browser interactive automation (upload/click/fill/collect sources) remains explicitly not yet supported.
+- REW export automation remains not yet supported.
+- Restart recovery restores pending approvals but does not fully replay interrupted in-flight execution threads.
 
-- Replace remaining placeholder behavior (notably artifact listing and placeholder task execution paths).
-- Add robust approval recovery/resume semantics across daemon restarts for in-flight waits.
-- Implement secure non-placeholder secret/key management if real provider keys are required.
-- Broaden workspace summarization beyond FRD/ZMA and add richer analysis workflow.
-- Expand operator capabilities beyond current read-only subset where product requirements allow.
+### Manual verification state for this pass
+
+- This was a **code truth pass**; flows were audited from implementation and wiring.
+- End-to-end manual verification was **not** performed in this pass.

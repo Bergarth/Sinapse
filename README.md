@@ -1,35 +1,57 @@
 # Sinapse
 
-Cross-platform desktop-agent monorepo with a working Python daemon, shared contracts, and storage migrations.
+Sinapse is a desktop-agent monorepo with a WinUI desktop shell, a Python gRPC daemon, shared protobuf contracts, and SQLite-backed local state.
+
+This README reflects the code as of **2026-04-02**.
 
 ## Repository layout
 
-- `apps/desktop-shell`: Desktop shell app workspace (early-stage scaffolding).
-- `services/agent-daemon`: gRPC daemon with conversation, tasks, workspace indexing, approvals, artifact persistence, and local speech paths.
-- `packages/contracts`: Shared protobuf contracts used by shell/daemon/services.
-- `packages/memory-store`: SQLite schema migrations and repository contract docs.
-- `tests`: Cross-package and integration test area.
-- `docs`: Contains project documentation and architecture notes.
+- `apps/desktop-shell` — WinUI 3 shell that talks to the daemon over gRPC.
+- `services/agent-daemon` — Python daemon implementing `DaemonContract`.
+- `packages/contracts` — shared protobuf contracts.
+- `packages/memory-store` — SQLite migrations + repository contract docs.
+- `packages/windows-operator` — Windows desktop operator implementation.
+- `packages/browser-operator` — controlled browser/read workflows.
+- `docs` — architecture and supporting docs.
 
-## Status
+## What is currently implemented
 
-Implemented today:
+- Shell ↔ daemon connection (`HealthCheck`, chat, tasks, workspace, settings, approvals, speech, stream observation).
+- SQLite persistence for conversations/messages/tasks/task steps/workspace roots+files/settings/approvals/artifacts.
+- Chat routing with Ollama support and explicit placeholder fallback.
+- Workspace intake + summarization across mixed file types (`.frd`, `.zma`, `.txt`, `.md`, `.json`, `.csv`, image types, `.zip`).
+- FRD/ZMA parsing and first-pass crossover suggestions.
+- Approval-gated task flows with persisted approval records and restart-time pending approval restoration.
+- Windows operator actions: enumerate windows, launch app, focus window, open file, type text (Windows only).
+- Browser flows: read-only open URL summary + controlled session navigation/download/upload envelopes.
+- REW workflow integration for launch/attach + import (export intentionally not yet supported).
+- Communications workflows: approval-gated SMTP email send and Slack-webhook messaging send.
+- Artifact persistence + `ListArtifacts` from stored records.
 
-- Shared contract-driven daemon API (`HealthCheck`, conversations/messages, tasks, approvals, workspace root attachment, artifact listing, system stream).
-- SQLite-backed persistence for conversations, messages, tasks, steps, workspace roots/files, app settings, approvals, and artifacts.
-- Real read-only task handlers for browser open-url and Windows window enumeration.
-- Controlled browser-session workflows for navigation/read/download/upload with explicit typed not-yet-supported responses where full automation is not reliable yet.
-- Real approval-gated Windows operator task handlers for safe write actions (launch app, focus window, open file, type text).
-- Approval-gated communications flows:
-  - Email draft/review/send via SMTP with workspace attachments.
-  - Messaging draft/review/send via Slack webhook.
-- Mixed speaker-workspace intake/summarization across FRD/ZMA, text/markdown/json/csv, zip inventories, and image metadata.
-- First-pass crossover region ranking for FRD/ZMA workflows with transparent warnings and confidence scores.
-- Approval-gated REW workflow task support (launch/attach + import) with explicit `not_yet_supported` export typing.
-- Approval-gate persistence with restart recovery for pending approvals.
-- Local secure API-key storage integration using Windows DPAPI-backed secret references.
+## Important dependency / environment gates
 
-Still in progress:
+- **Windows required** for:
+  - secure secret storage (DPAPI-backed `secret://local/...`),
+  - Windows operator actions.
+- **Ollama optional**: daemon falls back to placeholder responses if unavailable.
+- **STT optional dependency**: `openai-whisper`.
+- **TTS optional dependency**: `pyttsx3`.
+- **Email/messaging** require configuration + valid secret references.
+- **Browser interactive automation** is partially implemented: unsupported actions return typed `NOT_YET_SUPPORTED` responses.
 
-- Planner/executor expansion to support more task types.
-- Desktop-shell feature completion and end-to-end UX polish.
+## Getting started (daemon)
+
+```bash
+cd services/agent-daemon
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+agent-daemon
+```
+
+Default daemon address: `0.0.0.0:50051`.
+
+## Documentation added for this truth pass
+
+- `IMPLEMENTATION_AUDIT.md` — implementation reality by capability.
+- `SMOKE_TEST_MATRIX.md` — flow-by-flow state (code present vs runnable vs manually verified).
