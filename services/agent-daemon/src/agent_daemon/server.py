@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -621,6 +622,11 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         windows_operator = self._windows_operator.availability()
         browser_operator = self._browser_operator.availability()
         ollama_status = next((item for item in self._model_router.get_status() if item.provider_id == "ollama"), None)
+        settings = self._load_app_settings_payload()
+        email_ready, email_detail = self._email_readiness_status(settings)
+        messaging_ready, messaging_detail = self._messaging_readiness_status(settings)
+        stt_available = importlib.util.find_spec("whisper") is not None
+        tts_available = importlib.util.find_spec("pyttsx3") is not None
         return [
             pb2.CapabilityStatusDto(
                 capability_name="chat",
@@ -648,19 +654,28 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
                 detail=windows_operator.detail,
             ),
             pb2.CapabilityStatusDto(
+                capability_name="secure secret storage",
+                is_available=os.name == "nt",
+                detail=(
+                    "Secure secret storage is available (Windows DPAPI)."
+                    if os.name == "nt"
+                    else "Secure secret storage requires Windows. Run the daemon on Windows to use secret://local/... references."
+                ),
+            ),
+            pb2.CapabilityStatusDto(
                 capability_name="browser support",
                 is_available=browser_operator.is_available,
                 detail=browser_operator.detail,
             ),
             pb2.CapabilityStatusDto(
                 capability_name="email workflows",
-                is_available=True,
-                detail="Draft/review/approval-gated send via SMTP is available when configured.",
+                is_available=email_ready,
+                detail=email_detail,
             ),
             pb2.CapabilityStatusDto(
                 capability_name="messaging workflows",
-                is_available=True,
-                detail="Draft/review/approval-gated send via Slack webhook is available when configured.",
+                is_available=messaging_ready,
+                detail=messaging_detail,
             ),
             pb2.CapabilityStatusDto(
                 capability_name="ollama",
@@ -669,15 +684,69 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
             ),
             pb2.CapabilityStatusDto(
                 capability_name="speech-to-text",
-                is_available=True,
-                detail="Push-to-talk transcription path is available when local dependencies are installed.",
+                is_available=stt_available,
+                detail=(
+                    "Speech-to-text dependency is ready (openai-whisper installed)."
+                    if stt_available
+                    else "Speech-to-text is optional. Install it with `pip install openai-whisper` to enable push-to-talk transcription."
+                ),
             ),
             pb2.CapabilityStatusDto(
                 capability_name="text-to-speech",
-                is_available=True,
-                detail="Assistant reply speech path is available when local dependencies are installed.",
+                is_available=tts_available,
+                detail=(
+                    "Text-to-speech dependency is ready (pyttsx3 installed)."
+                    if tts_available
+                    else "Text-to-speech is optional. Install it with `pip install pyttsx3` to enable spoken replies."
+                ),
             ),
         ]
+
+    def _email_readiness_status(self, settings_payload: dict) -> tuple[bool, str]:
+        communications = settings_payload.get("communications", {})
+        email = communications.get("email", {}) if isinstance(communications, dict) else {}
+        host = str(email.get("smtp_host", "")).strip()
+        from_address = str(email.get("from_address", "")).strip()
+        username = str(email.get("username", "")).strip()
+        password_ref = str(email.get("password_secret_ref", "")).strip()
+        missing_fields = []
+        if not host:
+            missing_fields.append("smtp_host")
+        if not from_address:
+            missing_fields.append("from_address")
+        if not username:
+            missing_fields.append("username")
+        if not password_ref:
+            missing_fields.append("password_secret_ref")
+        if missing_fields:
+            return (
+                False,
+                "Email send is dependency-gated. Fill communications.email settings: "
+                + ", ".join(missing_fields)
+                + ".",
+            )
+        if not password_ref.startswith("secret://local/"):
+            return False, "Email send requires password_secret_ref in secret://local/<key> format."
+        secret_key = password_ref.removeprefix("secret://local/")
+        if not self._secret_store.has_secret(secret_key):
+            return False, f"Email send is blocked: secret '{password_ref}' was not found in secure storage."
+        return True, "Email workflow is configured and ready for approval-gated SMTP send."
+
+    def _messaging_readiness_status(self, settings_payload: dict) -> tuple[bool, str]:
+        communications = settings_payload.get("communications", {})
+        messaging = communications.get("messaging", {}) if isinstance(communications, dict) else {}
+        provider = str(messaging.get("provider", "slack-webhook")).strip().lower()
+        webhook_ref = str(messaging.get("slack_webhook_secret_ref", "")).strip()
+        if provider != "slack-webhook":
+            return False, f"Messaging provider '{provider}' is not yet supported (use 'slack-webhook')."
+        if not webhook_ref:
+            return False, "Messaging send is dependency-gated. Set communications.messaging.slack_webhook_secret_ref."
+        if not webhook_ref.startswith("secret://local/"):
+            return False, "Messaging send requires slack_webhook_secret_ref in secret://local/<key> format."
+        secret_key = webhook_ref.removeprefix("secret://local/")
+        if not self._secret_store.has_secret(secret_key):
+            return False, f"Messaging send is blocked: secret '{webhook_ref}' was not found in secure storage."
+        return True, "Messaging workflow is configured and ready for approval-gated Slack webhook send."
 
     def HealthCheck(self, request, context):
         _ = (request, context)
@@ -2407,14 +2476,32 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         password_ref = str(email_settings.get("password_secret_ref", "")).strip()
         port = int(email_settings.get("smtp_port", 587))
         security = str(email_settings.get("smtp_security", "starttls")).lower()
-        if not host or not from_address or not intent.to:
-            return {"is_success": False, "detail": "Missing email configuration or recipient.", "result_type": "missing_config"}
+        if not host or not from_address or not username or not intent.to:
+            return {
+                "is_success": False,
+                "detail": (
+                    "Email send is blocked because required fields are missing. "
+                    "Check communications.email.smtp_host, from_address, username, and the task recipient."
+                ),
+                "result_type": "missing_config",
+            }
         if not password_ref.startswith("secret://local/"):
-            return {"is_success": False, "detail": "Missing SMTP password secret reference.", "result_type": "missing_auth"}
+            return {
+                "is_success": False,
+                "detail": "Email send requires communications.email.password_secret_ref in secret://local/<key> format.",
+                "result_type": "missing_auth",
+            }
         secret_key = password_ref.removeprefix("secret://local/")
         secret = self._secret_store.get_secret(secret_key)
         if secret is None:
-            return {"is_success": False, "detail": "SMTP password secret was not found.", "result_type": "missing_auth"}
+            return {
+                "is_success": False,
+                "detail": (
+                    f"Email send could not find '{password_ref}' in secure storage. "
+                    "Save the secret from the shell settings while running the daemon on Windows."
+                ),
+                "result_type": "missing_auth",
+            }
 
         message = EmailMessage()
         message["From"] = from_address
@@ -2551,13 +2638,28 @@ class DaemonContractService(pb2_grpc.DaemonContractServicer):
         messaging = communications.get("messaging", {}) if isinstance(communications, dict) else {}
         provider = str(messaging.get("provider", "slack-webhook")).strip().lower()
         if provider != "slack-webhook":
-            return {"is_success": False, "detail": f"NOT_YET_SUPPORTED: messaging provider '{provider}'", "result_type": "not_yet_supported"}
+            return {
+                "is_success": False,
+                "detail": f"NOT_YET_SUPPORTED: messaging provider '{provider}'. Use provider 'slack-webhook' for now.",
+                "result_type": "not_yet_supported",
+            }
         webhook_ref = str(messaging.get("slack_webhook_secret_ref", "")).strip()
         if not webhook_ref.startswith("secret://local/"):
-            return {"is_success": False, "detail": "Missing Slack webhook secret reference.", "result_type": "missing_auth"}
+            return {
+                "is_success": False,
+                "detail": "Messaging send requires communications.messaging.slack_webhook_secret_ref in secret://local/<key> format.",
+                "result_type": "missing_auth",
+            }
         secret = self._secret_store.get_secret(webhook_ref.removeprefix("secret://local/"))
         if secret is None:
-            return {"is_success": False, "detail": "Slack webhook secret was not found.", "result_type": "missing_auth"}
+            return {
+                "is_success": False,
+                "detail": (
+                    f"Messaging send could not find '{webhook_ref}' in secure storage. "
+                    "Save the webhook secret from the shell settings while running the daemon on Windows."
+                ),
+                "result_type": "missing_auth",
+            }
         try:
             payload = {"text": intent.body}
             request = urllib.request.Request(

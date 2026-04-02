@@ -483,7 +483,7 @@ public sealed class DaemonConnectionService
             EnvironmentName: "unknown",
             LastSuccessfulConnectionUtc: null,
             Capabilities: [],
-            ErrorMessage: $"Could not connect to daemon: {errorDetail}");
+            ErrorMessage: $"Could not connect to daemon at {endpoint}. Start agent-daemon first, then retry. Details: {errorDetail}");
     }
 }
 

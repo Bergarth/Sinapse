@@ -16,6 +16,13 @@ class StoredSecret:
     created_at: str
 
 
+@dataclass(frozen=True)
+class ResolvedSecret:
+    secret_ref: str
+    secret_value: str
+    created_at: str
+
+
 class SecretStore:
     """Persist API secrets in a local encrypted file.
 
@@ -53,6 +60,33 @@ class SecretStore:
         if not normalized_key:
             return False
         return normalized_key in self._read_payload()
+
+    def get_secret(self, key: str) -> ResolvedSecret | None:
+        normalized_key = key.strip().lower()
+        if not normalized_key:
+            return None
+        payload = self._read_payload()
+        entry = payload.get(normalized_key)
+        if not isinstance(entry, dict):
+            return None
+        ciphertext_b64 = str(entry.get("ciphertext_b64", "")).strip()
+        if not ciphertext_b64:
+            return None
+
+        if os.name != "nt":
+            return None
+
+        try:
+            encrypted = base64.b64decode(ciphertext_b64.encode("ascii"))
+            secret_value = _decrypt_for_current_user(encrypted).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return None
+
+        return ResolvedSecret(
+            secret_ref=f"secret://local/{normalized_key}",
+            secret_value=secret_value,
+            created_at=str(entry.get("created_at", "")).strip(),
+        )
 
     def _read_payload(self) -> dict:
         if not self._storage_path.exists():
@@ -99,6 +133,28 @@ def _encrypt_for_current_user(payload: bytes) -> bytes:
         ctypes.byref(out_blob),
     ):
         raise ValueError("Windows DPAPI encryption failed while storing API key.")
+    try:
+        return _bytes_from_blob(out_blob)
+    finally:
+        if out_blob.pbData:
+            kernel32.LocalFree(out_blob.pbData)
+
+
+def _decrypt_for_current_user(payload: bytes) -> bytes:
+    in_blob = _blob_from_bytes(payload)
+    out_blob = _DATA_BLOB()
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    if not crypt32.CryptUnprotectData(
+        ctypes.byref(in_blob),
+        None,
+        None,
+        None,
+        None,
+        0,
+        ctypes.byref(out_blob),
+    ):
+        raise ValueError("Windows DPAPI decryption failed while reading API key.")
     try:
         return _bytes_from_blob(out_blob)
     finally:

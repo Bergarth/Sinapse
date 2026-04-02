@@ -12,34 +12,55 @@ This README reflects the code as of **2026-04-02**.
 - `packages/memory-store` — SQLite migrations + repository contract docs.
 - `packages/windows-operator` — Windows desktop operator implementation.
 - `packages/browser-operator` — controlled browser/read workflows.
-- `docs` — architecture and supporting docs.
+- `docs` — architecture and release-candidate docs.
 
-## What is currently implemented
+## Release-candidate status (clear categories)
 
-- Shell ↔ daemon connection (`HealthCheck`, chat, tasks, workspace, settings, approvals, speech, stream observation).
-- SQLite persistence for conversations/messages/tasks/task steps/workspace roots+files/settings/approvals/artifacts.
-- Chat routing with Ollama support and explicit placeholder fallback.
-- Workspace intake + summarization across mixed file types (`.frd`, `.zma`, `.txt`, `.md`, `.json`, `.csv`, image types, `.zip`).
-- FRD/ZMA parsing and first-pass crossover suggestions.
-- Approval-gated task flows with persisted approval records and restart-time pending approval restoration.
-- Windows operator actions: enumerate windows, launch app, focus window, open file, type text (Windows only).
-- Browser flows: read-only open URL summary + controlled session navigation/download/upload envelopes.
-- REW workflow integration for launch/attach + import (export intentionally not yet supported).
-- Communications workflows: approval-gated SMTP email send and Slack-webhook messaging send.
-- Artifact persistence + `ListArtifacts` from stored records.
+### Implemented
 
-## Important dependency / environment gates
+- Shell ↔ daemon connection and startup status panel.
+- Chat, task timeline, approvals, conversation persistence, artifact listing.
+- Workspace intake/summarization and FRD/ZMA parsing.
+- Windows operator actions (enumerate/launch/focus/open/type).
+- Browser read/open-url path and workflow envelope.
+- Email + messaging draft/review/send workflow plumbing.
 
-- **Windows required** for:
-  - secure secret storage (DPAPI-backed `secret://local/...`),
-  - Windows operator actions.
-- **Ollama optional**: daemon falls back to placeholder responses if unavailable.
-- **STT optional dependency**: `openai-whisper`.
-- **TTS optional dependency**: `pyttsx3`.
-- **Email/messaging** require configuration + valid secret references.
-- **Browser interactive automation** is partially implemented: unsupported actions return typed `NOT_YET_SUPPORTED` responses.
+### Runnable with config/dependencies
 
-## Getting started (daemon)
+- Ollama local-model chat path.
+- Secure secret-backed references (`secret://local/...`) when daemon runs on Windows.
+- STT (`openai-whisper`) and TTS (`pyttsx3`).
+- Email sending (SMTP settings + secret reference).
+- Messaging sending (Slack webhook secret reference).
+
+### Manually verified
+
+- See `SMOKE_TEST_MATRIX.md` for per-flow manual verification status.
+- Use `docs/WINDOWS_SMOKE_TEST_CHECKLIST.md` for repeatable manual verification.
+
+### Intentionally not yet supported
+
+- Some browser interactive automations return explicit `NOT_YET_SUPPORTED`.
+- REW export is intentionally not supported.
+
+## First-run dependency checks
+
+At shell startup, the daemon health payload now reports:
+
+- daemon reachable,
+- Ollama reachable,
+- Windows operator availability,
+- secure secret storage availability,
+- optional STT availability,
+- optional TTS availability,
+- email configuration readiness,
+- messaging configuration readiness.
+
+If a gate is missing, status details are written in beginner-friendly, actionable language.
+
+## Quick start
+
+### Daemon
 
 ```bash
 cd services/agent-daemon
@@ -49,9 +70,17 @@ pip install -e .
 agent-daemon
 ```
 
-Default daemon address: `0.0.0.0:50051`.
+### Shell (Windows)
 
-## Documentation added for this truth pass
+```powershell
+cd apps/desktop-shell/src/DesktopShell
+dotnet build
+# run with Visual Studio/debug profile
+```
 
+## RC docs
+
+- `SMOKE_TEST_MATRIX.md` — implemented vs runnable vs manually verified vs intentionally unsupported.
+- `docs/WINDOWS_SMOKE_TEST_CHECKLIST.md` — manual smoke checklist + runner docs for Windows.
+- `docs/RELEASE_READINESS_RC.md` — personal release-readiness notes.
 - `IMPLEMENTATION_AUDIT.md` — implementation reality by capability.
-- `SMOKE_TEST_MATRIX.md` — flow-by-flow state (code present vs runnable vs manually verified).
