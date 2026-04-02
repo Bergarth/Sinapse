@@ -1,31 +1,28 @@
 # desktop-shell
 
-Beginner-friendly scaffold for a **WinUI 3 desktop shell** using an MVVM-oriented folder layout.
+WinUI 3 desktop shell for Sinapse.
 
-## What this includes
+> This shell is **not just scaffold** anymore: it is wired to the daemon over shared gRPC contracts.
 
-- `src/DesktopShell/DesktopShell.csproj`: WinUI 3 project file (placeholder dependencies).
-- `App` + `MainWindow` bootstrap files.
-- `Views/` placeholders for:
-  - Main window composition
-  - Chat view
-  - Sidebar
-  - Settings view
-  - Onboarding view
-  - Task timeline placeholder
-  - Artifact panel placeholder
-- `ViewModels/` placeholder classes matching each view.
-- `Models/` and `Services/` folders with guidance notes.
+## What it does today
 
-## What this intentionally does **not** include
+- Connects to daemon endpoint (default `http://127.0.0.1:50051`) and shows health/capability status.
+- Sends chat messages and renders persisted conversation history.
+- Attaches workspace folders and shows scanned root summaries.
+- Loads and saves daemon app settings (model/search/speech/provider entries).
+- Starts tasks and listens to live timeline events from `ObserveSystemState`.
+- Shows approval prompts and can approve/deny/cancel from the UI.
+- Supports push-to-talk recording and daemon STT requests.
+- Supports spoken assistant replies via daemon TTS + local WAV playback.
 
-- No AI logic.
-- No backend integration.
-- No fake/mock service workflows.
+## Current limitations
 
-## Suggested next steps
+- This repo pass did not manually verify all shell flows end-to-end.
+- Availability of STT/TTS depends on daemon-side optional dependencies.
+- Some daemon task paths intentionally return `NOT_YET_SUPPORTED` for unsupported automation (for example certain browser interactive actions).
 
-1. Add a `NavigationService` for moving between major views.
-2. Add `INotifyPropertyChanged` base types for ViewModels.
-3. Wire `SettingsView` and `OnboardingView` into explicit routes/dialogs.
-4. Add unit tests for ViewModel behavior as logic appears.
+## Build notes
+
+- Project file: `src/DesktopShell/DesktopShell.csproj`
+- Contracts are sourced from: `packages/contracts/src/sinapse/contracts/v1/contracts.proto`
+- The shell expects a running daemon implementing `DaemonContract`.
